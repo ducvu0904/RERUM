@@ -108,7 +108,7 @@ def get_uplift_metrics(y_true, t_true, uplift_pred, k=0.3, bins=100, plot=True):
         x_final = np.append(0, x_norm)
         
         # Tính AUC bằng quy tắc hình thang (trapz)
-        score = np.trapz(y_final, x_final)
+        score = np.trapezoid(y_final, x_final)
         
         # Xử lý trường hợp gap0 âm (như trong code tác giả: if gap0 < 0 ...)
         # Tác giả cộng thêm diện tích hình vuông nếu gap < 0, 
