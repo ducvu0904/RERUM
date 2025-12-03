@@ -4,10 +4,10 @@ import torch.distributions as tdist
 from torch.distributions import LogNormal
 
 class ZILNLoss(nn.Module):
-    def _innit_ (self):
+    def __innit__ (self):
         super(ZILNLoss, self).__init__()
 
-    def forward(self, pred, y):
+    def forward(self, y, pred):
         """"
         Calculate ZILNLoss
         Arguments:
@@ -52,7 +52,7 @@ def compute_expected_value(pred):
     # 1. Trích xuất tham số (Giống hệt trong hàm Loss)
     p_buy = torch.sigmoid(pred[:, 0])    
     mu = pred[:, 1]                    
-    sigma = torch.nn.functional.softplus(pred[:, 2])
+    sigma = torch.nn.functional.softplus(pred[:, 2]) + 1e-6
 
     expected_positive_value = torch.exp(mu + 0.5 * sigma**2)
 
