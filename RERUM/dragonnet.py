@@ -15,7 +15,6 @@ class Dragonnet:
         beta=1.0,
         epochs=25,
         learning_rate= 1e-3,
-        loss_type="tarreg"
     ):
         self.model = DragonNetBase(input_dim)
         self.epoch = epochs
@@ -50,7 +49,7 @@ class Dragonnet:
                 
             val_loss = self.validate(val_loader)
             
-            if (epoch+1) % 5 == 0:
+            if (epoch+1) % 1 == 0:
                     print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/len(train_loader):.4f} | VAL LOSS: {val_loss:.4f}")
             if self.early_stop.early_stop(val_loss):
                 print(f"⏹️ Early stopped at epoch {epoch+1} because Val loss doesnt reduce.")
@@ -59,7 +58,7 @@ class Dragonnet:
         self.model.eval()
         val_loss=0
         with torch.no_grad():
-            for x, y, t in val_loader:
+            for x, t, y in val_loader:
                 x, t, y = x.to(self.device), t.to(self.device), y.to(self.device)
                 y0, y1, t_p, eps = self.model(x)
                 val_loss += tarreg_loss(y, t, t_p, y0, y1, eps,self.ranking_lambda, self.alpha, self.beta).item()

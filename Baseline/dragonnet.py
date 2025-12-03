@@ -13,7 +13,6 @@ class DragonNet:
         self.early_stopper = EarlyStopper(patience=10, min_delta=0)
     def fit (self, train_loader, val_loader):
         print (f"Begin training Dragonnet Baseline🔃🔃🔃 ") 
-        early_stop = EarlyStopper(patience=10, min_delta=0)
         for epoch in range(self.epochs):
             self.model.train()
             epoch_loss=0
@@ -35,7 +34,7 @@ class DragonNet:
             
             val_loss = self.validate(val_loader)
             
-            if (epoch+1) % 5 == 0:
+            if (epoch+1) % 1 == 0:
                 print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/len(train_loader):.4f} | VAL LOSS: {val_loss:.4f}")
             if self.early_stopper.early_stop(val_loss):
                 print(f"⏹️ Early stop at epoch {epoch+1} ")

@@ -85,26 +85,64 @@ def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     y0_pred = compute_expected_value(y0_pred)
     y1_pred = compute_expected_value(y1_pred)
     uplift_pred = y1_pred - y0_pred
+    
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.view(-1)
+    else:
+        y_true = torch.tensor(y_true, dtype=torch.float32)
+
+    if isinstance(t_true, torch.Tensor):
+        t_true = t_true.view(-1)
+    else:
+        t_true = torch.tensor(t_true, dtype=torch.float32)
+    
+    t_true = t_true.reshape(-1)
+    y_true = y_true.reshape(-1) 
+      
     uplift_pred_t = uplift_pred[t_true==1].unsqueeze(1)
     uplift_pred_c = uplift_pred[t_true==0].unsqueeze(1)
     softmax_uplift_pred_t = F.softmax(uplift_pred_t, dim=0)
     softmax_uplift_pred_c = F.softmax(uplift_pred_c, dim=0)
     
     #ground truth
-    y_true = torch.tensor(y_true)
     y_t = y_true[t_true==1].unsqueeze(1)
     y_c = y_true[t_true==0].unsqueeze(1)
     
-    N1 = y_t.shape[0]
-    N0 = y_c.shape[0]
+    N1 = (t_true == 1).sum().item()
+    N0 = (t_true == 0).sum().item()
     
-    loss = -( N1 + N0) * ((1/N1)*torch.sum(y_t * torch.log(softmax_uplift_pred_t)) - 1/N0*torch.sum(y_c*torch.log(softmax_uplift_pred_c)))
+    if N1 == 0 or N0 == 0:
+        print(f"⚠️ Warning: Batch has N1={N1}, N0={N0}. Skipping uplift ranking loss.")
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
+    
+    loss = -( N1 + N0) * ((1/N1)*torch.sum(y_t * torch.log(softmax_uplift_pred_t + 1e-8)) - 1/N0*torch.sum(y_c*torch.log(softmax_uplift_pred_c+1e-8)))
     return loss
 
 def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
+
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.view(-1)
+    else:
+        y_true = torch.tensor(y_true, dtype=torch.float32)
+
+    if isinstance(t_true, torch.Tensor):
+        t_true = t_true.view(-1)
+    else:
+        t_true = torch.tensor(t_true, dtype=torch.float32)
+        
     y0_pred = compute_expected_value(y0_pred)
     y1_pred = compute_expected_value(y1_pred)
-    y_true = torch.Tensor(y_true)
+    
+    y_true = y_true.reshape(-1)
+    t_true = t_true.reshape(-1)
+    
+    N1 = (t_true == 1).sum().item()
+    N0 = (t_true == 0).sum().item()
+    
+    if N1 < 2 and N0 < 2:
+        print(f"⚠️ Warning: Not enough samples for response ranking. N1={N1}, N0={N0}")
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
+    
     y_t = y_true[t_true==1].unsqueeze(1)
     y_c = y_true[t_true==0].unsqueeze(1)
     
@@ -112,22 +150,22 @@ def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     y_c_pred = y0_pred[t_true==0].unsqueeze(1)
     
     treat_loss = torch.tensor(0.0, device = y_true.device)
-    if y_t_pred.shape[0] >1:
+    if N1 >1:
         y_t_pred_matrix = y_t_pred - y_t_pred.T
         y_t_matrix = y_t - y_t.T
         product= y_t_pred_matrix * y_t_matrix
-        loss_matrix = (y_t_pred - y_t_pred_matrix)**2
-        mask = product >= 0
+        loss_matrix = (y_t_pred_matrix - y_t_matrix)**2
+        mask = (product >= 0)
         loss_matrix[mask] = 0.0
         treat_loss = torch.sum(loss_matrix)
         
     control_loss = torch.tensor(0.0, device=y_true.device)
-    if y_c_pred.shape[0] >1:
-        y_c_pred_matrix = y_t_pred - y_t_pred.T
+    if N0 >1:
+        y_c_pred_matrix = y_c_pred - y_c_pred.T
         y_c_matrix = y_c - y_c.T
         product = y_c_pred_matrix * y_c_matrix
         loss_matrix = (y_c_pred_matrix - y_c_matrix) **2
-        mask = product >=0 
+        mask = (product >=0)
         loss_matrix[mask] = 0.0
         control_loss = torch.sum(loss_matrix)
         
@@ -135,24 +173,36 @@ def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
 
 
 def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, ranking_lambda=1.0):
+    
+    if not isinstance(y_true, torch.Tensor):
+        y_true = torch.tensor(y_true, dtype=torch.float32, device=t_pred.device)
+    if not isinstance(t_true, torch.Tensor):
+        t_true = torch.tensor(t_true, dtype=torch.float32, device=t_pred.device)
+        
     ziln_loss = ZILNLoss()
+    
     t_pred = (t_pred +0.01)/1.02
     propensity_loss = torch.sum(F.binary_cross_entropy(t_pred, t_true))
     
-    loss_t = torch.sum (t_true * ziln_loss(y_true,y1_pred))
+    loss_t = torch.sum (t_true * ziln_loss(y_true, y1_pred))
     loss_c = torch.sum ((1-t_true) * ziln_loss(y_true, y0_pred))
     
     loss_uplift_ranking = uplift_ranking_loss(y_true, t_true,t_pred, y0_pred, y1_pred)
     loss_response_ranking = resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred)
-    print ("Loss uplift ranking:", loss_uplift_ranking)
-    print ("Loss response ranking:", loss_response_ranking)
-    loss_y = loss_t + loss_c + 10 *loss_uplift_ranking + (1e-4) *loss_response_ranking
+    # print ("Loss uplift ranking:", loss_uplift_ranking)
+    # print ("Loss response ranking:", loss_response_ranking)
+    loss_y = loss_t + loss_c + 10 *loss_uplift_ranking + 1 *loss_response_ranking
 
     loss = loss_y + alpha* propensity_loss
     return loss
     
 def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, ranking_lambda, alpha=1.0, beta=1.0):
-    _vanilla_loss = dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=alpha, ranking_lambda=ranking_lambda)
+    if not isinstance(y_true, torch.Tensor):
+        y_true = torch.tensor(y_true, dtype=torch.float32, device=t_pred.device)
+    if not isinstance(t_true, torch.Tensor):
+        t_true = torch.tensor(t_true, dtype=torch.float32, device=t_pred.device)
+        
+    vanilla_loss = dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=alpha, ranking_lambda=ranking_lambda)
     t_pred = (t_pred +0.01)/1.02
     
     y0_pred = compute_expected_value(y0_pred)
@@ -164,7 +214,7 @@ def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, ranking_lambda, a
     y_pert = y_pred + eps*h
     tarreg_loss = torch.sum((y_true - y_pert)**2)
     
-    loss = _vanilla_loss + beta*tarreg_loss
+    loss = vanilla_loss + beta*tarreg_loss
     return loss
     
 

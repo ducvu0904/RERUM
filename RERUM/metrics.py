@@ -32,8 +32,10 @@ def auuc(y_true, t_true, uplift_pred, bins=100, plot=True):
     data = data.sort_values(by="pred", ascending=False).reset_index(drop=True)
     
     #split into bucket
-    data["bucket"] = pd.qcut(-data['pred'], bins, labels=False, duplicates="drop")
-    
+    try:
+        data["bucket"] = pd.qcut(-data['pred'], bins, labels=False, duplicates="drop")
+    except:
+        data['bucket'] = pd.cut(-data['pred'], bins, labels=False)
     #create random baseline
     control_data = data.loc[data['t']==0]
     treatment_data = data.loc[data['t']==1]
@@ -54,8 +56,8 @@ def auuc(y_true, t_true, uplift_pred, bins=100, plot=True):
     population =[]
     bucket_ids = sorted(data['bucket'].unique())
     
-    for idx, bucket_id in enumerate(bucket_ids):
-        cumulative_data = data.loc[data['bucket'] <= bucket_id]
+    for i in bucket_ids:
+        cumulative_data = data.loc[data['bucket'] <= i]
         
         control_group = cumulative_data.loc[cumulative_data['t']==0]
         treatment_group =  cumulative_data.loc[cumulative_data['t']==1]
@@ -65,7 +67,7 @@ def auuc(y_true, t_true, uplift_pred, bins=100, plot=True):
         n_total = n_control + n_treatment
         
         if n_control==0 or n_treatment==0:
-            print(f"Bucket {bucket_id}: Empty group, skip")
+            print(f"Bucket {i}: Empty group, skip")
             continue
         
         #calculate mean outcome
@@ -152,7 +154,10 @@ def auqc(y_true, t_true, uplift_pred, bins=100, plot=True):
     data = data.sort_values(by="pred", ascending=False).reset_index(drop=True)
     
     #split into bucket
-    data["bucket"] = pd.qcut(-data['pred'], bins, labels=False, duplicates="drop")
+    try:
+        data["bucket"] = pd.qcut(-data['pred'], bins, labels=False, duplicates="drop")
+    except:
+        data['bucket'] = pd.cut(-data['pred'], bins, labels=False)
     
     #create random baseline
     control_data = data.loc[data['t']==0]
@@ -271,7 +276,10 @@ def lift (y_true, t_true, uplift_pred, h=0.3, bins=100, plot=True):
     })
     #sort
     data = data.sort_values(by="pred", ascending=False).reset_index(drop=True)
-    data['bucket'] = pd.qcut(-data['pred'], bins, labels= False, duplicates="drop")
+    try:
+        data["bucket"] = pd.qcut(-data['pred'], bins, labels=False, duplicates="drop")
+    except:
+        data['bucket'] = pd.cut(-data['pred'], bins, labels=False)
     
     bucket_sorted = sorted(data['bucket'].unique())
     cutoff_idx = int(len(bucket_sorted) *h)
@@ -316,7 +324,10 @@ def krcc(y_true, t_true, uplift_pred, bins=100):
     })
     #sort
     data = data.sort_values(by="pred", ascending=False).reset_index(drop=True)
-    data['bucket'] = pd.qcut(-data['pred'], bins, labels= False, duplicates="drop")
+    try:
+        data["bucket"] = pd.qcut(-data['pred'], bins, labels=False, duplicates="drop")
+    except:
+        data['bucket'] = pd.cut(-data['pred'], bins, labels=False)
     
     cate_list = []
     pred_uplift_list =[]
