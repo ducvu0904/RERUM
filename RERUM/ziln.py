@@ -4,15 +4,14 @@ import torch.distributions as tdist
 from torch.distributions import LogNormal
 
 class ZILNLoss(nn.Module):
-    def __innit__ (self):
+    def __init__(self):
         super(ZILNLoss, self).__init__()
-
     def forward(self, y, pred):
         """"
         Calculate ZILNLoss
         Arguments:
             pred = output of models, shape (N,3)
-                   pred[:, 0]: accuracy(p), pred[:, 1]: mean_log , pred[:, 2]: deviation_log
+                    pred[:, 0]: accuracy(p), pred[:, 1]: mean_log , pred[:, 2]: deviation_log
 
             y =  real "spend",  shape (N, 1)
 

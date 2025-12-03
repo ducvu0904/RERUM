@@ -91,6 +91,7 @@ def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     softmax_uplift_pred_c = F.softmax(uplift_pred_c, dim=0)
     
     #ground truth
+    y_true = torch.tensor(y_true)
     y_t = y_true[t_true==1].unsqueeze(1)
     y_c = y_true[t_true==0].unsqueeze(1)
     
@@ -103,7 +104,7 @@ def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
 def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     y0_pred = compute_expected_value(y0_pred)
     y1_pred = compute_expected_value(y1_pred)
-    
+    y_true = torch.Tensor(y_true)
     y_t = y_true[t_true==1].unsqueeze(1)
     y_c = y_true[t_true==0].unsqueeze(1)
     
@@ -132,12 +133,14 @@ def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
         
     return treat_loss + control_loss
 
+
 def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, ranking_lambda=1.0):
+    ziln_loss = ZILNLoss()
     t_pred = (t_pred +0.01)/1.02
     propensity_loss = torch.sum(F.binary_cross_entropy(t_pred, t_true))
     
-    loss_t = torch.sum (t_true * ZILNLoss(y_true,y1_pred))
-    loss_c = torch.sum ((1-t_true) * ZILNLoss(y_true, y0_pred))
+    loss_t = torch.sum (t_true * ziln_loss(y_true,y1_pred))
+    loss_c = torch.sum ((1-t_true) * ziln_loss(y_true, y0_pred))
     
     loss_uplift_ranking = uplift_ranking_loss(y_true, t_true,t_pred, y0_pred, y1_pred)
     loss_response_ranking = resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred)
@@ -149,7 +152,7 @@ def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, ran
     return loss
     
 def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, ranking_lambda, alpha=1.0, beta=1.0):
-    vanilla_loss = dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=alpha, ranking_lambda=ranking_lambda)
+    _vanilla_loss = dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=alpha, ranking_lambda=ranking_lambda)
     t_pred = (t_pred +0.01)/1.02
     
     y0_pred = compute_expected_value(y0_pred)
@@ -161,7 +164,7 @@ def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, ranking_lambda, a
     y_pert = y_pred + eps*h
     tarreg_loss = torch.sum((y_true - y_pert)**2)
     
-    loss = vanilla_loss + beta*tarreg_loss
+    loss = _vanilla_loss + beta*tarreg_loss
     return loss
     
 
