@@ -75,7 +75,7 @@ class DragonNetBase(nn.Module):
         y1 = F.relu(self.headT_2(y1))
         y1 = F.relu(self.headT_out(y1))
         
-        eps = self.epsilon(torch.ones_like(t_pred))
+        eps = self.epsilon(torch.ones_like(t_pred)[:, 0:1])
         
         return y0 ,y1 ,t_pred, eps
 

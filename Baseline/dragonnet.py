@@ -10,9 +10,10 @@ class DragonNet:
         self.beta = beta
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
-        self.early_stopper = EarlyStopper(patience=10, min_delta=0)
+
     def fit (self, train_loader, val_loader):
         print (f"Begin training Dragonnet Baseline🔃🔃🔃 ") 
+        early_stopper = EarlyStopper(patience=10, min_delta=0)
         for epoch in range(self.epochs):
             self.model.train()
             epoch_loss=0
@@ -36,7 +37,7 @@ class DragonNet:
             
             if (epoch+1) % 1 == 0:
                 print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/len(train_loader):.4f} | VAL LOSS: {val_loss:.4f}")
-            if self.early_stopper.early_stop(val_loss):
+            if early_stopper.early_stop(val_loss):
                 print(f"⏹️ Early stop at epoch {epoch+1} ")
                 break
     def validate(self, val_loader):
@@ -52,5 +53,5 @@ class DragonNet:
     def predict(self, x):
         self.model.eval()
         with torch.no_grad():
-            y0, y1, t_p, _  = self.model(x.to(self.device))
-        return y0.cpu(), y1.cpu(), t_p.cpu()
+            y0, y1, t_pred, eps  = self.model(x.to(self.device))
+        return y0, y1, t_pred, eps

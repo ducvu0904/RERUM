@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ziln import ZILNLoss, compute_expected_value
 import numpy as np
 
 class DragonNetBase(nn.Module):
@@ -29,12 +28,12 @@ class DragonNetBase(nn.Module):
         #---------Control outcome head-------------
         self.headC_1 = nn.Linear(shared_hidden_layer, outcome_hidden)
         self.headC_2 = nn.Linear(outcome_hidden, outcome_hidden)
-        self.headC_out = nn.Linear(outcome_hidden, 3)
+        self.headC_out = nn.Linear(outcome_hidden, 1)
         
         #---------Treatment outcome head------------
         self.headT_1 = nn.Linear(shared_hidden_layer, outcome_hidden)
         self.headT_2 = nn.Linear(outcome_hidden, outcome_hidden)
-        self.headT_out = nn.Linear(outcome_hidden, 3)
+        self.headT_out = nn.Linear(outcome_hidden, 1)
         
         #---------Propensity score-----------------
         self.propensity_head = nn.Linear(shared_hidden_layer,1)
@@ -76,14 +75,13 @@ class DragonNetBase(nn.Module):
         y1 = F.relu(self.headT_2(y1))
         y1 = F.relu(self.headT_out(y1))
         
-        eps = self.epsilon(torch.ones_like(t_pred))
+        eps = self.epsilon(torch.ones_like(t_pred)[:, 0:1])
         
         return y0 ,y1 ,t_pred, eps
 
 def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     #listwise ranking loss
-    y0_pred = compute_expected_value(y0_pred)
-    y1_pred = compute_expected_value(y1_pred)
+    
     uplift_pred = y1_pred - y0_pred
     
     if isinstance(y_true, torch.Tensor):
@@ -129,9 +127,6 @@ def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
         t_true = t_true.view(-1)
     else:
         t_true = torch.tensor(t_true, dtype=torch.float32)
-        
-    y0_pred = compute_expected_value(y0_pred)
-    y1_pred = compute_expected_value(y1_pred)
     
     y_true = y_true.reshape(-1)
     t_true = t_true.reshape(-1)
@@ -151,8 +146,8 @@ def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     
     treat_loss = torch.tensor(0.0, device = y_true.device)
     if N1 >1:
-        y_t_pred_matrix = y_t_pred - y_t_pred.T
-        y_t_matrix = y_t - y_t.T
+        y_t_pred_matrix = y_t_pred - y_t_pred.mT
+        y_t_matrix = y_t - y_t.mT
         product= y_t_pred_matrix * y_t_matrix
         loss_matrix = (y_t_pred_matrix - y_t_matrix)**2
         mask = (product >= 0)
@@ -161,8 +156,8 @@ def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
         
     control_loss = torch.tensor(0.0, device=y_true.device)
     if N0 >1:
-        y_c_pred_matrix = y_c_pred - y_c_pred.T
-        y_c_matrix = y_c - y_c.T
+        y_c_pred_matrix = y_c_pred - y_c_pred.mT
+        y_c_matrix = y_c - y_c.mT
         product = y_c_pred_matrix * y_c_matrix
         loss_matrix = (y_c_pred_matrix - y_c_matrix) **2
         mask = (product >=0)
@@ -178,14 +173,12 @@ def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, ran
         y_true = torch.tensor(y_true, dtype=torch.float32, device=t_pred.device)
     if not isinstance(t_true, torch.Tensor):
         t_true = torch.tensor(t_true, dtype=torch.float32, device=t_pred.device)
-        
-    ziln_loss = ZILNLoss()
     
     t_pred = (t_pred +0.01)/1.02
     propensity_loss = torch.sum(F.binary_cross_entropy(t_pred, t_true))
     
-    loss_t = torch.sum (t_true * ziln_loss(y_true, y1_pred))
-    loss_c = torch.sum ((1-t_true) * ziln_loss(y_true, y0_pred))
+    loss_t = torch.sum (t_true * torch.square(y_true - y1_pred))
+    loss_c = torch.sum ((1-t_true) * torch.square(y_true - y0_pred))
     
     loss_uplift_ranking = uplift_ranking_loss(y_true, t_true,t_pred, y0_pred, y1_pred)
     loss_response_ranking = resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred)
@@ -205,8 +198,6 @@ def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, ranking_lambda, a
     vanilla_loss = dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=alpha, ranking_lambda=ranking_lambda)
     t_pred = (t_pred +0.01)/1.02
     
-    y0_pred = compute_expected_value(y0_pred)
-    y1_pred = compute_expected_value(y1_pred)
     y_pred = t_true *y1_pred + (1-t_true)*y0_pred
     
     h = (t_true/t_pred) - ((1-t_true)/ (1-t_pred))
@@ -216,15 +207,13 @@ def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, ranking_lambda, a
     
     loss = vanilla_loss + beta*tarreg_loss
     return loss
-    
 
-        
 class EarlyStopper:
     def __init__(self, patience=15, min_delta=0):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
-        self.min_validation_loss = np.inf
+        self.min_validation_loss = float("inf")
 
     def early_stop(self, validation_loss):
         if validation_loss < self.min_validation_loss:

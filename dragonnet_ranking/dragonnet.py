@@ -1,8 +1,6 @@
-from model import DragonNetBase, tarreg_loss, EarlyStopper, dragonnet_loss
-from ziln import compute_expected_value, ZILNLoss
+from model import DragonNetBase, tarreg_loss, EarlyStopper
 import torch 
 import numpy as np
-from functools import partial
 
 class Dragonnet:
     def __init__(
@@ -16,7 +14,7 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
     ):
-        self.model = DragonNetBase(input_dim)
+        self.model = DragonNetBase(input_dim, shared_hidden, outcome_hidden)
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -69,8 +67,6 @@ class Dragonnet:
         x = torch.Tensor(x)
         with torch.no_grad():
             y0_pred, y1_pred, t_pred, eps = self.model(x)
-            y0_pred = compute_expected_value(y0_pred)
-            y1_pred = compute_expected_value(y1_pred)
         return y0_pred, y1_pred, t_pred, eps
             
             
