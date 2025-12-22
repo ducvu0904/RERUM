@@ -56,7 +56,7 @@ def compute_expected_value(pred):
     p_buy = torch.sigmoid(pred[:, 0])    
     mu = pred[:, 1]                    
     sigma = torch.nn.functional.softplus(pred[:, 2])
-    expected_positive_value = torch.exp(mu + 0.5 * sigma**2)
+    expected_positive_value = torch.exp(mu + 0.5 * (sigma**2))
 
     final_pred = p_buy * expected_positive_value
     

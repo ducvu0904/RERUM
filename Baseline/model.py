@@ -68,12 +68,12 @@ class DragonNetBase(nn.Module):
         #outcome control
         y0 = F.relu(self.headC_1(z))
         y0 = F.relu(self.headC_2(y0))
-        y0 = F.relu(self.headC_out(y0))
+        y0 = self.headC_out(y0)
 
         #outcome treatment
         y1 = F.relu(self.headT_1(z))
         y1 = F.relu(self.headT_2(y1))
-        y1 = F.relu(self.headT_out(y1))
+        y1 = self.headT_out(y1)
         
         eps = self.epsilon(torch.ones_like(t_pred)[:, 0:1])
         
