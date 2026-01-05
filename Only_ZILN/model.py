@@ -135,7 +135,7 @@ def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0):
         loss1 = zero_inflated_lognormal_loss(y_true[treatment_idx], y1_pred[treatment_idx])
     # print (f"loss0 = {loss0} | loss1 = {loss1}")   
     loss_y = loss0 +  2 * loss1
-    print (f"losst = {loss_t} | lossy = {loss_y}")
+    # print (f"losst = {loss_t} | lossy = {loss_y}")
     loss = loss_y + alpha * loss_t
     
     return loss
