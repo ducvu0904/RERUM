@@ -1,5 +1,6 @@
 import torch 
 from ziln import zero_inflated_lognormal_pred
+import torch.nn.functional as F
 def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     #listwise ranking loss
     y0_pred = zero_inflated_lognormal_pred(y0_pred)
@@ -21,9 +22,9 @@ def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
     uplift_pred = uplift_pred.reshape(-1)
       
     # Compute softmax separately for each group
-    softmax_uplift_pred  = F.softmax(uplift_pred, dim=0)
-    softmax_uplift_pred_t = softmax_uplift_pred[t_true==1]
-    softmax_uplift_pred_c = softmax_uplift_pred[t_true==0]
+    log_softmax_uplift_pred  = F.log_softmax(uplift_pred, dim=0)
+    softmax_uplift_pred_t = log_softmax_uplift_pred[t_true==1]
+    softmax_uplift_pred_c = log_softmax_uplift_pred[t_true==0]
     # uplift_pred_t = uplift_pred[t_true==1]
     # uplift_pred_c = uplift_pred[t_true==0]
     
@@ -41,7 +42,7 @@ def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
         print(f"⚠️ Warning: Batch has N1={N1}, N0={N0}. Skipping uplift ranking loss.")
         return torch.tensor(0.0, device=y_true.device, requires_grad=True)
     
-    loss = -((1/N1) * torch.sum(y_t * torch.log(softmax_uplift_pred_t + 1e-8)) - (1/N0) * torch.sum(y_c * torch.log(softmax_uplift_pred_c + 1e-8)))
+    loss = -((1/N1) * torch.sum(y_t * softmax_uplift_pred_t + 1e-8) - (1/N0) * torch.sum(y_c * softmax_uplift_pred_c))
     return loss
 
 def memory_efficient_ranking_loss(pred_row, target_row, pred_col, target_col, max_samples=200):
@@ -151,5 +152,12 @@ def resposne_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
         
         cross_loss = loss_tc + loss_ct
     
+    num_intra_pairs = N1 * (N1-1) + N0 * (N0 - 1) if (N1 >1 or N0 >1) else 1
+    num_cross_pairs = N1 * N0 * 2 if (N1 > 0 and N0 > 0) else 1
+    total_pairs = num_intra_pairs + num_cross_pairs
+
     total_loss = intra_group_loss + cross_loss
-    return total_loss
+    
+    normalized_loss = total_loss / max(total_pairs, 1)
+
+    return normalized_loss

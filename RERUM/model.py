@@ -115,7 +115,7 @@ class DragonNetBase(nn.Module):
 
         return y0, y1, t_pred, eps
 
-def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0):
+def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, response_lambda=1.0, uplift_lambda = 1.0):
     
     t_pred_clipped = torch.clamp(t_pred, 0.01, 0.99)
     loss_t = torch.mean(F.binary_cross_entropy(t_pred_clipped, t_true))
@@ -133,16 +133,20 @@ def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0):
         loss0 = zero_inflated_lognormal_loss(y_true[control_idx], y0_pred[control_idx])
     if treatment_idx.sum() > 0:
         loss1 = zero_inflated_lognormal_loss(y_true[treatment_idx], y1_pred[treatment_idx])
-    # print (f"loss0 = {loss0} | loss1 = {loss1}")   
+    # print (f"loss0 = {loss0} | loss1 = {loss1}")
+    uplift_loss = uplift_lambda * uplift_ranking_loss(y_true, t_true, t_pred_clipped, y0_pred, y1_pred)
+    response_loss = response_lambda * resposne_ranking_loss(y_true, t_true, t_pred_clipped, y0_pred, y1_pred)  
     loss_y = loss0 +  2 * loss1
-    print (f"losst = {loss_t} | lossy = {loss_y}")
-    loss = loss_y + alpha * loss_t
+    print (f"lossy = {loss_y} | response ranking loss = {response_loss} | uplift ranking loss = {uplift_loss}") 
+
+    # print (f"losst = {loss_t} | lossy = {loss_y}")
+    loss = loss_y + alpha * loss_t + response_loss + uplift_loss
     
     return loss
     
-def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, beta=1.0):
+def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, beta=1.0, response_lambda= 1.0, uplift_lambda= 1.0):
 
-    vanilla_loss= dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=alpha)
+    vanilla_loss= dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=alpha, response_lambda= response_lambda,uplift_lambda=uplift_lambda)
     t_pred_clipped = (t_pred + 0.01) / 1.02
 
     y0_pred_exp = zero_inflated_lognormal_pred(y0_pred)

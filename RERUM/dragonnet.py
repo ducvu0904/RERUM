@@ -14,6 +14,8 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
         weight_decay = 1e-4,
+        response_lambda = 1.0,
+        uplift_lambda = 1.0,
         early_stop_metric='loss'  # 'loss' hoặc 'qini'
     ):
         self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden)
@@ -24,6 +26,8 @@ class Dragonnet:
         self.alpha = alpha
         self.beta = beta
         self.early_stop_metric = early_stop_metric
+        self.response_lambda = response_lambda
+        self.uplift_lambda = uplift_lambda
         
         # Chọn early stopper phù hợp
         if early_stop_metric == 'qini':
@@ -46,8 +50,10 @@ class Dragonnet:
                     
                     y0_pred, y1_pred, t_pred, eps = self.model(x_batch)
                     
-
-                    loss = tarreg_loss(y_batch, t_batch, t_pred, y0_pred, y1_pred, eps, alpha=self.alpha, beta=self.beta)
+                    if epoch <=5:
+                        loss = tarreg_loss(y_batch, t_batch, t_pred, y0_pred, y1_pred, eps, alpha=self.alpha, beta=self.beta, response_lambda=0, uplift_lambda=0)
+                    else: 
+                        loss = tarreg_loss(y_batch, t_batch, t_pred, y0_pred, y1_pred, eps, alpha=self.alpha, beta=self.beta, response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda)
                     
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -59,34 +65,38 @@ class Dragonnet:
                 val_metric = self.validate_qini(val_loader)
                 metric_name = "Qini"
             else:
-                val_metric = self.validate(val_loader)
+                val_metric = self.validate(val_loader, epoch)
                 metric_name = "Val Loss"
                     
             if (epoch+1) % 1 == 0:
                     print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/len(train_loader):.4f} | {metric_name}: {val_metric:.4f}")
             
-            # Early stopping
-            if self.early_stop_metric == 'qini':
-                # Truyền model để lưu state khi có kết quả tốt nhất
-                if self.early_stop.early_stop(val_metric, epoch, model=self.model):
-                    print(f"⏹️ Early stopped at epoch {epoch+1}. Best Qini: {self.early_stop.best_qini:.4f} at epoch {self.early_stop.best_epoch+1}")
-                    break
-            else:
-                if self.early_stop.early_stop(val_metric, epoch, model=self.model):
-                    print(f"⏹️ Early stopped at epoch {epoch+1} because Val loss doesnt reduce.")
-                    break
+            # Early stopping (only from epoch 7 onwards when full loss is used)
+            if epoch >= 6:
+                if self.early_stop_metric == 'qini':
+                    # Truyền model để lưu state khi có kết quả tốt nhất
+                    if self.early_stop.early_stop(val_metric, epoch, model=self.model):
+                        print(f"⏹️ Early stopped at epoch {epoch+1}. Best Qini: {self.early_stop.best_qini:.4f} at epoch {self.early_stop.best_epoch+1}")
+                        break
+                else:
+                    if self.early_stop.early_stop(val_metric, epoch, model=self.model):
+                        print(f"⏹️ Early stopped at epoch {epoch+1} because Val loss doesnt reduce.")
+                        break
         
         # Khôi phục model về epoch tốt nhất
         self.early_stop.restore_best_model(self.model)
-    def validate(self, val_loader):
+    def validate(self, val_loader, epoch):
         self.model.eval()
         val_loss=0
         with torch.no_grad():
             for x, t, y in val_loader:
                 x, t, y = x.to(self.device), t.to(self.device), y.to(self.device)
                 y0, y1, t_p, eps = self.model(x)
+                if epoch <=5:
+                    val_loss += tarreg_loss(y, t, t_p, y0, y1, eps, alpha=self.alpha, beta=self.beta, response_lambda=0, uplift_lambda=0).item()
+                else:
+                    val_loss += tarreg_loss(y, t, t_p, y0, y1, eps, alpha=self.alpha, beta=self.beta, response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda).item()
 
-                val_loss += tarreg_loss(y, t, t_p, y0, y1, eps, alpha=self.alpha, beta=self.beta).item()
         return val_loss / len(val_loader)
     
     def validate_qini(self, val_loader):
