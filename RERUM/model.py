@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from ziln import zero_inflated_lognormal_pred, zero_inflated_lognormal_loss
 import numpy as np
-from ranking import memory_efficient_ranking_loss, resposne_ranking_loss, uplift_ranking_loss
+from ranking import response_ranking_loss, uplift_ranking_loss
 
 class DragonNetBase(nn.Module):
     """
@@ -92,7 +92,7 @@ class DragonNetBase(nn.Module):
                 
     def forward(self, inputs):
         z = self.shared(inputs)
-        t_pred = torch.sigmoid(self.treat_out(z.detach()))
+        t_pred = torch.sigmoid(self.treat_out(z))
         
         # --- CONTROL FLOW ---
         # Đi qua thân chung
@@ -118,13 +118,10 @@ class DragonNetBase(nn.Module):
 def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, response_lambda=1.0, uplift_lambda = 1.0):
     
     t_pred_clipped = torch.clamp(t_pred, 0.01, 0.99)
-    loss_t = torch.mean(F.binary_cross_entropy(t_pred_clipped, t_true))
+    loss_t = alpha * torch.mean(F.binary_cross_entropy(t_pred_clipped, t_true))
     
     control_idx = (t_true.squeeze()==0)
     treatment_idx = (t_true.squeeze()==1)
-    
-    # y0_pred = zero_inflated_lognormal_pred(y0_pred)
-    # y1_pred = zero_inflated_lognormal_pred(y1_pred)
     
     loss0 = torch.tensor(0.0, device=t_true.device) 
     loss1 = torch.tensor(0.0, device=t_true.device)
@@ -133,14 +130,29 @@ def dragonnet_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, res
         loss0 = zero_inflated_lognormal_loss(y_true[control_idx], y0_pred[control_idx])
     if treatment_idx.sum() > 0:
         loss1 = zero_inflated_lognormal_loss(y_true[treatment_idx], y1_pred[treatment_idx])
-    # print (f"loss0 = {loss0} | loss1 = {loss1}")
-    uplift_loss = uplift_lambda * uplift_ranking_loss(y_true, t_true, t_pred_clipped, y0_pred, y1_pred)
-    response_loss = response_lambda * resposne_ranking_loss(y_true, t_true, t_pred_clipped, y0_pred, y1_pred)  
-    loss_y = loss0 +  2 * loss1
-    print (f"lossy = {loss_y} | response ranking loss = {response_loss} | uplift ranking loss = {uplift_loss}") 
+    # print (f"propensity loss = {loss_t} | loss0 = {loss0} | loss1 = {loss1}")
+    
+    # Tính raw ranking losses
+    uplift_loss_raw = uplift_ranking_loss(y_true, t_true, t_pred_clipped, y0_pred, y1_pred)
+    response_loss_raw = response_ranking_loss(y_true, t_true, t_pred_clipped, y0_pred, y1_pred)  
+    
+    loss_y = loss0 + loss1
+    
+    # with torch.no_grad():
+    #     loss_y_scale = loss_y.abs().clamp(min=1e-6)
+    #     response_scale = response_loss_raw.abs().clamp(min=1e-6)
+    #     uplift_scale = uplift_loss_raw.abs().clamp(min=1e-6)
+    
+    # response_loss_normalized = (response_loss_raw / response_scale) * loss_y_scale
+    # uplift_loss_normalized = (uplift_loss_raw / uplift_scale) * loss_y_scale
+    
+    # Apply lambda weights
+    response_loss = response_lambda * response_loss_raw
+    uplift_loss = uplift_lambda * uplift_loss_raw
+    
+    # print(f"lossy = {loss_y:.4f} | response_raw = {response_loss_raw:.4f} | uplift_raw = {uplift_loss_raw:.4f} | resp_norm = {response_loss:.4f} | uplift_norm = {uplift_loss:.4f}") 
 
-    # print (f"losst = {loss_t} | lossy = {loss_y}")
-    loss = loss_y + alpha * loss_t + response_loss + uplift_loss
+    loss = loss_y + loss_t + response_loss + uplift_loss
     
     return loss
     
@@ -159,10 +171,10 @@ def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0, beta=1
     y_pert = y_pred + eps * h
     targeted_regularization_raw = torch.mean((y_true - y_pert)**2)
     scale_factor = torch.mean(y_true**2).detach() + 1e-6
-    normalized_tarreg_loss = targeted_regularization_raw / scale_factor
+    normalized_tarreg_loss = beta * (targeted_regularization_raw / scale_factor)
     # print (f"tarreg loss = {normalized_tarreg_loss}")
     # final
-    loss = vanilla_loss + beta * normalized_tarreg_loss
+    loss = vanilla_loss + normalized_tarreg_loss
     
     return loss
     

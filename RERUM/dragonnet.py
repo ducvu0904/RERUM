@@ -35,16 +35,15 @@ class Dragonnet:
         else:
             self.early_stop = EarlyStopper(patience=10, min_delta=0)
 
-    def fit(self, train_loader, val_loader):
+    def fit(self, train_t_loader, train_c_loader, val_loader):
         print ("🔃🔃🔃Begin training Dragonnet🔃🔃🔃")
         for epoch in range(self.epoch):
             self.model.train()
             epoch_loss=0
-            for x_batch , t_batch ,y_batch in train_loader:
-                    x_batch = x_batch.to(self.device)
-                    
-                    t_batch =t_batch.to(self.device) 
-                    y_batch = y_batch.to(self.device)
+            for (xt, tt, yt), (xc, tc, yc) in zip(train_t_loader, train_c_loader):
+                    x_batch = torch.cat([xt, xc], dim=0).to(self.device)
+                    t_batch = torch.cat([tt, tc], dim=0).to(self.device)
+                    y_batch = torch.cat([yt, yc], dim=0).to(self.device)
                     
                     self.optim.zero_grad()
                     
@@ -69,7 +68,7 @@ class Dragonnet:
                 metric_name = "Val Loss"
                     
             if (epoch+1) % 1 == 0:
-                    print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/len(train_loader):.4f} | {metric_name}: {val_metric:.4f}")
+                    print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/(len(train_t_loader)+len(train_c_loader)):.4f} | {metric_name}: {val_metric:.4f}")
             
             # Early stopping (only from epoch 7 onwards when full loss is used)
             if epoch >= 6:
