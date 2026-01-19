@@ -14,9 +14,10 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
         weight_decay = 1e-4,
-        response_lambda = 1.0,
-        uplift_lambda = 1.0,
-        early_stop_metric='loss'  # 'loss' hoặc 'qini'
+        response_lambda = 0.0,
+        uplift_lambda = 0.0,
+        max_samples = 200,
+        early_stop_metric='loss'
     ):
         self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden)
         self.epoch = epochs
@@ -28,6 +29,7 @@ class Dragonnet:
         self.early_stop_metric = early_stop_metric
         self.response_lambda = response_lambda
         self.uplift_lambda = uplift_lambda
+        self.max_samples = max_samples
         
         # Chọn early stopper phù hợp
         if early_stop_metric == 'qini':
@@ -41,22 +43,38 @@ class Dragonnet:
             self.model.train()
             epoch_loss=0
             for (xt, tt, yt), (xc, tc, yc) in zip(train_t_loader, train_c_loader):
-                    x_batch = torch.cat([xt, xc], dim=0).to(self.device)
-                    t_batch = torch.cat([tt, tc], dim=0).to(self.device)
-                    y_batch = torch.cat([yt, yc], dim=0).to(self.device)
+                    n_t = xt.shape[0]  
+                    
+                    # Move to device
+                    xt, tt, yt = xt.to(self.device), tt.to(self.device), yt.to(self.device)
+                    xc, tc, yc = xc.to(self.device), tc.to(self.device), yc.to(self.device)
+                    
+                    # Concat forward pass
+                    x_batch = torch.cat([xt, xc], dim=0)
+                    t_batch = torch.cat([tt, tc], dim=0)
                     
                     self.optim.zero_grad()
                     
                     y0_pred, y1_pred, t_pred, eps = self.model(x_batch)
                     
-                    if epoch <=5:
-                        loss = tarreg_loss(y_batch, t_batch, t_pred, y0_pred, y1_pred, eps, alpha=self.alpha, beta=self.beta, response_lambda=0, uplift_lambda=0)
-                    else: 
-                        loss = tarreg_loss(y_batch, t_batch, t_pred, y0_pred, y1_pred, eps, alpha=self.alpha, beta=self.beta, response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda)
+                    # Split predictions theo treatment/control
+                    y0_pred_t, y0_pred_c = y0_pred[:n_t], y0_pred[n_t:]
+                    y1_pred_t, y1_pred_c = y1_pred[:n_t], y1_pred[n_t:]
+                    
+                    loss = tarreg_loss(
+                            y_t=yt, y_c=yc,
+                            y0_pred_t=y0_pred_t, y0_pred_c=y0_pred_c,
+                            y1_pred_t=y1_pred_t, y1_pred_c=y1_pred_c,
+                            t_pred=t_pred, t_true=t_batch, eps=eps,
+                            n_t=n_t,
+                            alpha=self.alpha, beta=self.beta,
+                            response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda,
+                            max_samples=self.max_samples
+                        )
                     
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optim.step()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)                    
                     epoch_loss += loss.item()
             
             # Tính metric cho early stopping
@@ -67,20 +85,18 @@ class Dragonnet:
                 val_metric = self.validate(val_loader, epoch)
                 metric_name = "Val Loss"
                     
-            if (epoch+1) % 1 == 0:
+            if (epoch+1) % 10 == 0:
                     print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/(len(train_t_loader)+len(train_c_loader)):.4f} | {metric_name}: {val_metric:.4f}")
             
-            # Early stopping (only from epoch 7 onwards when full loss is used)
-            if epoch >= 6:
-                if self.early_stop_metric == 'qini':
-                    # Truyền model để lưu state khi có kết quả tốt nhất
-                    if self.early_stop.early_stop(val_metric, epoch, model=self.model):
-                        print(f"⏹️ Early stopped at epoch {epoch+1}. Best Qini: {self.early_stop.best_qini:.4f} at epoch {self.early_stop.best_epoch+1}")
-                        break
-                else:
-                    if self.early_stop.early_stop(val_metric, epoch, model=self.model):
-                        print(f"⏹️ Early stopped at epoch {epoch+1} because Val loss doesnt reduce.")
-                        break
+            if self.early_stop_metric == 'qini':
+                # Truyền model để lưu state khi có kết quả tốt nhất
+                if self.early_stop.early_stop(val_metric, epoch, model=self.model):
+                    print(f"⏹️ Early stopped at epoch {epoch+1}. Best Qini: {self.early_stop.best_qini:.4f} at epoch {self.early_stop.best_epoch+1}")
+                    break
+            else:
+                if self.early_stop.early_stop(val_metric, epoch, model=self.model):
+                    print(f"⏹️ Early stopped at epoch {epoch+1} because Val loss doesnt reduce.")
+                    break
         
         # Khôi phục model về epoch tốt nhất
         self.early_stop.restore_best_model(self.model)
@@ -91,10 +107,30 @@ class Dragonnet:
             for x, t, y in val_loader:
                 x, t, y = x.to(self.device), t.to(self.device), y.to(self.device)
                 y0, y1, t_p, eps = self.model(x)
-                if epoch <=5:
-                    val_loss += tarreg_loss(y, t, t_p, y0, y1, eps, alpha=self.alpha, beta=self.beta, response_lambda=0, uplift_lambda=0).item()
-                else:
-                    val_loss += tarreg_loss(y, t, t_p, y0, y1, eps, alpha=self.alpha, beta=self.beta, response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda).item()
+                
+                # Val loader có mixed data - cần split theo t_true
+                t_mask = t.squeeze() == 1
+                c_mask = t.squeeze() == 0
+                n_t = t_mask.sum().item()
+                
+                # Sắp xếp lại: treatment trước, control sau
+                y_t, y_c = y[t_mask], y[c_mask]
+                y0_pred_t, y0_pred_c = y0[t_mask], y0[c_mask]
+                y1_pred_t, y1_pred_c = y1[t_mask], y1[c_mask]
+                t_pred_sorted = torch.cat([t_p[t_mask], t_p[c_mask]], dim=0)
+                t_true_sorted = torch.cat([t[t_mask], t[c_mask]], dim=0)
+                eps_sorted = torch.cat([eps[t_mask], eps[c_mask]], dim=0)
+                
+                val_loss += tarreg_loss(
+                        y_t=y_t, y_c=y_c,
+                        y0_pred_t=y0_pred_t, y0_pred_c=y0_pred_c,
+                        y1_pred_t=y1_pred_t, y1_pred_c=y1_pred_c,
+                        t_pred=t_pred_sorted, t_true=t_true_sorted, eps=eps_sorted,
+                        n_t=n_t,
+                        alpha=self.alpha, beta=self.beta,
+                        response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda,
+                        max_samples=self.max_samples
+                    ).item()
 
         return val_loss / len(val_loader)
     

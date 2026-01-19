@@ -1,4 +1,4 @@
-from model import DragonNetBase, tarreg_loss, EarlyStopper, dragonnet_loss
+from model import DragonNetBase, tarreg_loss, EarlyStopper, dragonnet_loss, tarreg_loss_dual, dragonnet_loss_dual
 
 from metrics import auqc
 import torch 
@@ -34,16 +34,27 @@ class Dragonnet:
             self.model.train()
             epoch_loss=0
             for (xt, tt, yt), (xc, tc, yc) in zip(train_t_loader, train_c_loader):
+                    # Concatenate batches to process through shared layers together
                     x_batch = torch.cat([xt, xc], dim=0).to(self.device)
-                    t_batch = torch.cat([tt, tc], dim=0).to(self.device)
-                    y_batch = torch.cat([yt, yc], dim=0).to(self.device)
+                    yt, yc = yt.to(self.device), yc.to(self.device)
+                    
+                    batch_size_t = xt.shape[0]
+                    batch_size_c = xc.shape[0]
                     
                     self.optim.zero_grad()
                     
+                    # Single forward pass through shared layers
                     y0_pred, y1_pred, t_pred, eps = self.model(x_batch)
                     
-
-                    loss = tarreg_loss(y_batch, t_batch, t_pred, y0_pred, y1_pred, eps, alpha=self.alpha, beta=self.beta)
+                    # Split predictions for treatment and control groups
+                    y0_pred_t, y0_pred_c = y0_pred[:batch_size_t], y0_pred[batch_size_t:]
+                    y1_pred_t, y1_pred_c = y1_pred[:batch_size_t], y1_pred[batch_size_t:]
+                    t_pred_t, t_pred_c = t_pred[:batch_size_t], t_pred[batch_size_t:]
+                    
+                    # Use dual stream loss
+                    loss = tarreg_loss_dual(yt, yc, t_pred_t, t_pred_c, 
+                                           y0_pred_t, y1_pred_t, y0_pred_c, y1_pred_c,
+                                           eps, alpha=self.alpha, beta=self.beta)
                     
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
