@@ -1,8 +1,10 @@
-from model import DragonNetBase, tarreg_loss, EarlyStopper, dragonnet_loss, QiniEarlyStopper
+from model import DragonNetBase, EarlyStopper, dragonnet_loss, QiniEarlyStopper, tarreg_loss
 from ziln import zero_inflated_lognormal_pred
 from metrics import auqc
 import torch 
 import numpy as np
+import copy
+from ranking import response_ranking_loss_log, uplift_ranking_loss
 class Dragonnet:
     def __init__(
         self, 
@@ -14,10 +16,14 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
         weight_decay = 1e-4,
-        response_lambda = 0.0,
-        uplift_lambda = 0.0,
-        max_samples = 200,
-        early_stop_metric='loss'
+        early_stop_metric='qini',
+        tarrreg_start_epoch = 200,
+        rr_lambda = 1e-3,
+        ur_lambda = 1e-3,
+        max_sample = 200,
+        use_ema=False,
+        ema_alpha=0.3,
+        patience=10,
     ):
         self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden)
         self.epoch = epochs
@@ -27,111 +33,153 @@ class Dragonnet:
         self.alpha = alpha
         self.beta = beta
         self.early_stop_metric = early_stop_metric
-        self.response_lambda = response_lambda
-        self.uplift_lambda = uplift_lambda
-        self.max_samples = max_samples
+        self.tarreg_start_epoch = tarrreg_start_epoch
+        self.rr_lambda = rr_lambda
+        self.max_rr_samples = max_sample
+        self.ur_lambda = ur_lambda
         
-        # Chọn early stopper phù hợp
-        if early_stop_metric == 'qini':
-            self.early_stop = QiniEarlyStopper(patience=10, min_delta=0)
-        else:
-            self.early_stop = EarlyStopper(patience=10, min_delta=0)
+        # EMA parameters
+        self.use_ema = use_ema
+        self.ema_alpha = ema_alpha
+        self.patience = patience
+        
+        # Tracking cho best model dựa trên Qini score
+        self.best_qini = -np.inf
+        self.best_epoch = 0
+        self.best_model_state = None
+        
+        # EMA tracking
+        self.ema_qini = None
+        self.best_ema_qini = -np.inf
+        self.patience_counter = 0
 
-    def fit(self, train_t_loader, train_c_loader, val_loader):
+    def fit(self, train_loader, val_loader):
         print ("🔃🔃🔃Begin training Dragonnet🔃🔃🔃")
+        if self.use_ema:
+            print (f"📊 Strategy: EMA-based early stopping (alpha={self.ema_alpha}, patience={self.patience})")
+        else:
+            print (f"📊 Strategy: Train for {self.epoch} epochs, then select model with best Qini score")
+        
         for epoch in range(self.epoch):
             self.model.train()
             epoch_loss=0
-            for (xt, tt, yt), (xc, tc, yc) in zip(train_t_loader, train_c_loader):
-                    n_t = xt.shape[0]  
+            for x_batch , t_batch ,y_batch in train_loader:
+                    x_batch = x_batch.to(self.device)
                     
-                    # Move to device
-                    xt, tt, yt = xt.to(self.device), tt.to(self.device), yt.to(self.device)
-                    xc, tc, yc = xc.to(self.device), tc.to(self.device), yc.to(self.device)
+                    t_batch =t_batch.to(self.device) 
+                    y_batch = y_batch.to(self.device)
                     
-                    # Concat forward pass
-                    x_batch = torch.cat([xt, xc], dim=0)
-                    t_batch = torch.cat([tt, tc], dim=0)
-                    
+                    t_mask = (t_batch.squeeze(1) == 1)
+                    c_mask = (t_batch.squeeze(1) == 0)
                     self.optim.zero_grad()
                     
                     y0_pred, y1_pred, t_pred, eps = self.model(x_batch)
                     
-                    # Split predictions theo treatment/control
-                    y0_pred_t, y0_pred_c = y0_pred[:n_t], y0_pred[n_t:]
-                    y1_pred_t, y1_pred_c = y1_pred[:n_t], y1_pred[n_t:]
-                    
-                    loss = tarreg_loss(
-                            y_t=yt, y_c=yc,
-                            y0_pred_t=y0_pred_t, y0_pred_c=y0_pred_c,
-                            y1_pred_t=y1_pred_t, y1_pred_c=y1_pred_c,
-                            t_pred=t_pred, t_true=t_batch, eps=eps,
-                            n_t=n_t,
-                            alpha=self.alpha, beta=self.beta,
-                            response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda,
-                            max_samples=self.max_samples
-                        )
-                    
+                    y_t = y_batch[t_mask]
+                    y_c = y_batch[c_mask]
+
+                    y0_pred_c = y0_pred[c_mask]
+                    y1_pred_t = y1_pred[t_mask]
+
+                    base_loss = dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t_batch, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha)
+                    if epoch >= self.tarreg_start_epoch:
+                        tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred_c=y0_pred, y1_pred_t=y1_pred, eps=eps, beta= self.beta)
+                        loss = base_loss + tarreg_reg
+                    else:
+                        tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred_c=y0_pred, y1_pred_t=y1_pred, eps=eps, beta= 0)
+                        loss = base_loss
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optim.step()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)                    
                     epoch_loss += loss.item()
             
-            # Tính metric cho early stopping
-            if self.early_stop_metric == 'qini':
-                val_metric = self.validate_qini(val_loader)
-                metric_name = "Qini"
-            else:
-                val_metric = self.validate(val_loader, epoch)
-                metric_name = "Val Loss"
-                    
-            if (epoch+1) % 10 == 0:
-                    print(f"Epoch {epoch+1} | Train Loss: {epoch_loss/(len(train_t_loader)+len(train_c_loader)):.4f} | {metric_name}: {val_metric:.4f}")
+            # Tính Qini score trên validation set sau mỗi epoch
+            val_qini = self.validate_qini(val_loader)
+            val_loss = self.validate(val_loader)
             
-            if self.early_stop_metric == 'qini':
-                # Truyền model để lưu state khi có kết quả tốt nhất
-                if self.early_stop.early_stop(val_metric, epoch, model=self.model):
-                    print(f"⏹️ Early stopped at epoch {epoch+1}. Best Qini: {self.early_stop.best_qini:.4f} at epoch {self.early_stop.best_epoch+1}")
+            if self.use_ema:
+                # EMA-based tracking
+                if self.ema_qini is None:
+                    self.ema_qini = val_qini
+                else:
+                    self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
+                
+                # Check for improvement based on EMA
+                if self.ema_qini > self.best_ema_qini:
+                    self.best_ema_qini = self.ema_qini
+                    self.best_qini = val_qini  # Keep raw value too
+                    self.best_epoch = epoch
+                    self.best_model_state = copy.deepcopy(self.model.state_dict())
+                    self.patience_counter = 0
+                    best_marker = "⭐ NEW BEST EMA"
+                else:
+                    self.patience_counter += 1
+                    best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                
+                if (epoch+1) % 1 == 0:
+                    print(
+                        f"Epoch {epoch+1}/{self.epoch} | "
+                        f"Base Loss: {base_loss.item():.4f} | "
+                        f"Tarreg Loss: {tarreg_reg.item():.6f} | "
+                        f"Total Loss: {loss.item():.4f} | "
+                        f"Val Loss: {val_loss:.4f} | "
+                        f"Val Qini: {val_qini:.4f} | "
+                        f"EMA Qini: {self.ema_qini:.4f} {best_marker}"
+                    )
+                
+                # Early stopping
+                if self.patience_counter >= self.patience:
+                    print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                     break
             else:
-                if self.early_stop.early_stop(val_metric, epoch, model=self.model):
-                    print(f"⏹️ Early stopped at epoch {epoch+1} because Val loss doesnt reduce.")
-                    break
+                # Original: track raw Qini
+                if val_qini > self.best_qini:
+                    self.best_qini = val_qini
+                    self.best_epoch = epoch
+                    self.best_model_state = copy.deepcopy(self.model.state_dict())
+                    best_marker = "⭐ NEW BEST"
+                else:
+                    best_marker = ""
+                    
+                if (epoch+1) % 1 == 0:
+                    print(
+                        f"Epoch {epoch+1}/{self.epoch} | "
+                        f"Base Loss: {base_loss.item():.4f} | "
+                        f"Tarreg Loss: {tarreg_reg.item():.6f} | "
+                        f"Total Loss: {loss.item():.4f} | "
+                        f"Val Loss: {val_loss:.4f} | "
+                        f"Val Qini: {val_qini:.4f} {best_marker}"
+                    )
         
-        # Khôi phục model về epoch tốt nhất
-        self.early_stop.restore_best_model(self.model)
-    def validate(self, val_loader, epoch):
+        # Khôi phục model về epoch có Qini score tốt nhất
+        if self.best_model_state is not None:
+            self.model.load_state_dict(self.best_model_state)
+            if self.use_ema:
+                print(f"\n✅ Training completed! Restored model to epoch {self.best_epoch+1}")
+                print(f"   Raw Qini: {self.best_qini:.4f} | EMA Qini: {self.best_ema_qini:.4f}")
+            else:
+                print(f"\n✅ Training completed! Restored model to epoch {self.best_epoch+1} with best Qini score: {self.best_qini:.4f}")
+        else:
+            print(f"\n⚠️ No valid model state saved. Using final epoch model.")
+    def validate(self, val_loader):
         self.model.eval()
         val_loss=0
         with torch.no_grad():
             for x, t, y in val_loader:
                 x, t, y = x.to(self.device), t.to(self.device), y.to(self.device)
-                y0, y1, t_p, eps = self.model(x)
+                t_mask = (t.squeeze(1) == 1)
+                c_mask = (t.squeeze(1) == 0)
                 
-                # Val loader có mixed data - cần split theo t_true
-                t_mask = t.squeeze() == 1
-                c_mask = t.squeeze() == 0
-                n_t = t_mask.sum().item()
-                
-                # Sắp xếp lại: treatment trước, control sau
-                y_t, y_c = y[t_mask], y[c_mask]
-                y0_pred_t, y0_pred_c = y0[t_mask], y0[c_mask]
-                y1_pred_t, y1_pred_c = y1[t_mask], y1[c_mask]
-                t_pred_sorted = torch.cat([t_p[t_mask], t_p[c_mask]], dim=0)
-                t_true_sorted = torch.cat([t[t_mask], t[c_mask]], dim=0)
-                eps_sorted = torch.cat([eps[t_mask], eps[c_mask]], dim=0)
-                
-                val_loss += tarreg_loss(
-                        y_t=y_t, y_c=y_c,
-                        y0_pred_t=y0_pred_t, y0_pred_c=y0_pred_c,
-                        y1_pred_t=y1_pred_t, y1_pred_c=y1_pred_c,
-                        t_pred=t_pred_sorted, t_true=t_true_sorted, eps=eps_sorted,
-                        n_t=n_t,
-                        alpha=self.alpha, beta=self.beta,
-                        response_lambda=self.response_lambda, uplift_lambda=self.uplift_lambda,
-                        max_samples=self.max_samples
-                    ).item()
+                y0, y1, t_pred, eps = self.model(x)
+                y_t = y[t_mask]
+                y_c = y[c_mask]
 
+                y0_pred_t = y0[t_mask]
+                y0_pred_c = y0[c_mask]
+                y1_pred_t = y1[t_mask]
+                y1_pred_c = y1[c_mask]
+
+                val_loss += dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha).item()
         return val_loss / len(val_loader)
     
     def validate_qini(self, val_loader):

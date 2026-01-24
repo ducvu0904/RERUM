@@ -16,18 +16,18 @@ class DragonNetBase(nn.Module):
     outcome_hidden: int
         layer size for conditional outcome layers
     """
-    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, outcome_dropout=0.2):
+    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, outcome_dropout=0.0):
         super(DragonNetBase, self).__init__()
         self.shared = nn.Sequential(
         nn.Linear(in_features=input_dim, out_features=shared_hidden),
         nn.ReLU(),
-        nn.Dropout(0.2),
+        nn.Dropout(0.0),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
         nn.ReLU(),
-        nn.Dropout(0.2),
+        nn.Dropout(0.0),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
         nn.ReLU(),
-        nn.Dropout(0.2)
+        nn.Dropout(0.0)
         )
 
         self.treat_out = nn.Linear(in_features=shared_hidden, out_features=1)
@@ -85,125 +85,34 @@ class DragonNetBase(nn.Module):
     
 
 
-def dragonnet_loss(
-    y_t, y_c,                    # Ground truth đã split
-    y0_pred_t, y0_pred_c,        # Y0 predictions đã split  
-    y1_pred_t, y1_pred_c,        # Y1 predictions đã split
-    t_pred, t_true, eps,         # Propensity và treatment labels (full batch)
-    alpha=1.0, 
-    response_lambda=1.0, 
-    uplift_lambda=1.0,
-    max_samples=200
-):
-    """
-    DragonNet loss với dual stream input.
+def dragonnet_loss(y_t, y_c, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0):
     
-    Args:
-        y_t, y_c: Ground truth của treatment và control groups
-        y0_pred_t, y0_pred_c: Y0 predictions cho treatment và control
-        y1_pred_t, y1_pred_c: Y1 predictions cho treatment và control  
-        t_pred: Propensity predictions (full batch)
-        t_true: Treatment labels (full batch)
-        eps: Epsilon từ model
-        alpha: Weight cho propensity loss
-        response_lambda: Weight cho response ranking loss
-        uplift_lambda: Weight cho uplift ranking loss
-        max_samples: S trong paper - số samples để tính ranking loss
-    """
-    # Propensity loss (trên full batch)
     t_pred_clipped = torch.clamp(t_pred, 0.01, 0.99)
-    loss_t = torch.mean(F.binary_cross_entropy(t_pred_clipped, t_true))    
-    # ZILN
-    loss1 = torch.mean((y_t  - y1_pred_t)**2)
-    loss0 = torch.mean((y_c - y0_pred_c)**2)
-    loss_y = (loss0 + loss1)/2
+    loss_t = torch.sum(F.binary_cross_entropy(t_pred_clipped, t_true, reduction='none'))
     
+    loss_1 = torch.sum(torch.square((y_t - y1_pred)))
+    loss_0 = torch.sum(torch.square((y_c - y0_pred)))
+    loss_y = (loss_0 +  loss_1)
+    # print (f"lossy = {loss_y} ") 
 
-    loss = loss_y + alpha * loss_t 
+    # print (f"losst = {loss_t} | lossy = {loss_y}")
+    loss = loss_y + alpha * loss_t
     
     return loss
-    
-def tarreg_loss(
-    y_t, y_c,                    # Ground truth đã split
-    y0_pred_t, y0_pred_c,        # Y0 predictions đã split
-    y1_pred_t, y1_pred_c,        # Y1 predictions đã split
-    t_pred, t_true, eps,         # Propensity và treatment labels (full batch)
-    n_t,                         # Số samples trong treatment batch (để split lại eps, t_pred)
-    alpha=1.0, 
-    beta=1.0, 
-    response_lambda=1.0, 
-    uplift_lambda=1.0,
-    max_samples=200
-):
-    """
-    Targeted regularization loss với dual stream input.
-    
-    Args:
-        y_t, y_c: Ground truth của treatment và control groups
-        y0_pred_t, y0_pred_c: Y0 predictions cho treatment và control
-        y1_pred_t, y1_pred_c: Y1 predictions cho treatment và control
-        t_pred: Propensity predictions (full batch)
-        t_true: Treatment labels (full batch)  
-        eps: Epsilon từ model (full batch)
-        n_t: Số samples trong treatment batch
-        alpha: Weight cho propensity loss
-        beta: Weight cho targeted regularization
-        response_lambda: Weight cho response ranking loss
-        uplift_lambda: Weight cho uplift ranking loss
-        max_samples: S trong paper
-    """
-    # DragonNet loss
-    vanilla_loss = dragonnet_loss(
-        y_t, y_c, 
-        y0_pred_t, y0_pred_c, 
-        y1_pred_t, y1_pred_c,
-        t_pred, t_true, eps,
-        alpha=alpha, 
-        response_lambda=response_lambda, 
-        uplift_lambda=uplift_lambda,
-        max_samples=max_samples
-    )
+
+def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, beta=1.0):
     
     # Targeted regularization
     t_pred_clipped = (t_pred + 0.01) / 1.02
     
-    # Split predictions theo t/c để tính y_pred
-    t_pred_t = t_pred_clipped[:n_t]
-    t_pred_c = t_pred_clipped[n_t:]
-    t_true_t = t_true[:n_t]  # Sẽ là 1s
-    t_true_c = t_true[n_t:]  # Sẽ là 0s
-    eps_t = eps[:n_t]
-    eps_c = eps[n_t:]
+    y_pred = t_true * y1_pred + (1-t_true) * y0_pred
     
-    # Convert ZILN predictions
-    y0_pred_exp_t = zero_inflated_lognormal_pred(y0_pred_t)
-    y0_pred_exp_c = zero_inflated_lognormal_pred(y0_pred_c)
-    y1_pred_exp_t = zero_inflated_lognormal_pred(y1_pred_t)
-    y1_pred_exp_c = zero_inflated_lognormal_pred(y1_pred_c)
+    h= (t_true/t_pred_clipped) - ((1-t_true)/ (1-t_pred_clipped))
     
-    # y_pred = t * y1 + (1-t) * y0
-    y_pred_t = t_true_t * y1_pred_exp_t + (1 - t_true_t) * y0_pred_exp_t  # = y1_pred_exp_t (vì t=1)
-    y_pred_c = t_true_c * y1_pred_exp_c + (1 - t_true_c) * y0_pred_exp_c  # = y0_pred_exp_c (vì t=0)
+    y_pert = y_pred + eps * h 
+    targeted_regularization = torch.sum((y_true-y_pert)**2)
     
-    # h = t/e - (1-t)/(1-e)
-    h_t = (t_true_t / t_pred_t) - ((1 - t_true_t) / (1 - t_pred_t))  # = 1/e (vì t=1)
-    h_c = (t_true_c / t_pred_c) - ((1 - t_true_c) / (1 - t_pred_c))  # = -1/(1-e) (vì t=0)
-    
-    # y_pert = y_pred + eps * h
-    y_pert_t = y_pred_t + eps_t * h_t
-    y_pert_c = y_pred_c + eps_c * h_c
-    
-    # Targeted regularization trên cả 2 groups
-    tarreg_t = torch.sum((y_t - y_pert_t)**2)
-    tarreg_c = torch.sum((y_c - y_pert_c)**2)
-    targeted_regularization_raw = (tarreg_t + tarreg_c)
-    
-    # Normalize
-    # y_all = torch.cat([y_t, y_c], dim=0)
-    # scale_factor = torch.mean(y_all**2).detach() + 1e-6
-    # normalized_tarreg_loss = beta * (targeted_regularization_raw / scale_factor)
-    
-    loss = vanilla_loss + beta * targeted_regularization_raw
+    loss = beta * targeted_regularization
     
     return loss
     

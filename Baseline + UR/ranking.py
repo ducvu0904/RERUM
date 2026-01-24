@@ -1,10 +1,7 @@
 import torch 
-from ziln import zero_inflated_lognormal_pred
 import torch.nn.functional as F
-def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred, T=5):
+def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred):
     #listwise ranking loss
-    y0_pred = zero_inflated_lognormal_pred(y0_pred)
-    y1_pred = zero_inflated_lognormal_pred(y1_pred)
     uplift_pred = y1_pred - y0_pred
     
     if isinstance(y_true, torch.Tensor):
@@ -21,8 +18,9 @@ def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred, T=5):
     y_true = y_true.reshape(-1) 
     uplift_pred = uplift_pred.reshape(-1)
     uplift_pred = torch.clamp(uplift_pred, -50, 50)
-    # Compute softmax separately for each group
-    log_probs = torch.logsumexp(uplift_pred, dim=0)
+    # Compute log_softmax manually using logsumexp
+    # log_softmax(x) = x - logsumexp(x)
+    log_probs = uplift_pred - torch.logsumexp(uplift_pred, dim=0)
     mask_t = (t_true==1)
     mask_c = (t_true==0)
     
