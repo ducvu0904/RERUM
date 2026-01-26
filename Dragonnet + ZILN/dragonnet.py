@@ -1,4 +1,5 @@
 from model import DragonNetBase, EarlyStopper, dragonnet_loss, QiniEarlyStopper, tarreg_loss
+from ziln import zero_inflated_lognormal_pred
 from metrics import auqc
 import torch 
 import numpy as np
@@ -15,21 +16,28 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
         weight_decay = 1e-4,
-        early_stop_metric='loss',
-        use_ema=False,
+        early_stop_metric='qini',
+        rr_lambda = 1e-4,
+        ur_lambda = 10,
+        max_sample = 200,
+        use_ema=True,
         ema_alpha=0.15,
         patience=10,
-        shared_dropout = 0,
-        outcome_droupout = 0
+        outcome_dropout = 0,
+        shared_dropout = 0
     ):
-        self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_droupout)
+        self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, outcome_drop=outcome_dropout, shared_drop=shared_dropout )
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.alpha = alpha
         self.beta = beta
-        self.early_stop_metric = early_stop_metric        
+        self.early_stop_metric = early_stop_metric
+        self.rr_lambda = rr_lambda
+        self.max_rr_samples = max_sample
+        self.ur_lambda = ur_lambda
+        
         # EMA parameters
         self.use_ema = use_ema
         self.ema_alpha = ema_alpha
@@ -82,9 +90,8 @@ class Dragonnet:
                     y1_pred_t = y1_pred[t_mask]
 
                     base_loss = dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t_batch, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha)
-                    tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred=y0_pred, y1_pred=y1_pred, eps=eps, beta= self.beta)
-                    loss = base_loss
-                    
+                    tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred_c=y0_pred, y1_pred_t=y1_pred, eps=eps, beta= self.beta)
+                    loss = base_loss + tarreg_reg
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optim.step()
@@ -175,7 +182,7 @@ class Dragonnet:
                         print(f"   No valid peak (raw ≥ trend) found in last {self.patience} epochs")
                         break
                 else:
-                    # Original: track raw Qini
+                    # Original: track raw Qini only
                     if val_qini > self.best_qini:
                         self.best_qini = val_qini
                         self.best_epoch = epoch
@@ -211,6 +218,7 @@ class Dragonnet:
         else:
             print(f"\n⚠️ No valid model state saved. Using final epoch model.")
     def validate(self, val_loader):
+
         self.model.eval()
         val_loss=0
         with torch.no_grad():
@@ -223,8 +231,10 @@ class Dragonnet:
                 y_t = y[t_mask]
                 y_c = y[c_mask]
 
+                y0_pred_t = y0[t_mask]
                 y0_pred_c = y0[c_mask]
                 y1_pred_t = y1[t_mask]
+                y1_pred_c = y1[c_mask]
 
                 val_loss += dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha).item()
         return val_loss / len(val_loader)
@@ -241,6 +251,10 @@ class Dragonnet:
                 x = x.to(self.device)
                 y0_pred, y1_pred, t_pred, eps = self.model(x)
                 
+                # Chuyển đổi ZILN predictions
+                y0_pred = zero_inflated_lognormal_pred(y0_pred)
+                y1_pred = zero_inflated_lognormal_pred(y1_pred)
+                
                 # Tính uplift
                 uplift = (y1_pred - y0_pred).cpu().numpy()
                 
@@ -253,7 +267,7 @@ class Dragonnet:
             y_true=np.array(y_true_list),
             t_true=np.array(t_true_list),
             uplift_pred=np.array(uplift_list),
-            bins=100,  
+            bins=100,  # Giảm số bins để nhanh hơn
             plot=False
         )
         
@@ -264,6 +278,8 @@ class Dragonnet:
         x = torch.tensor(x, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             y0_pred, y1_pred, t_pred, eps = self.model(x)
+            y0_pred = zero_inflated_lognormal_pred(y0_pred)
+            y1_pred = zero_inflated_lognormal_pred(y1_pred)
         return y0_pred, y1_pred, t_pred, eps
             
 # Xem uplift của một cá nhân bất kỳ

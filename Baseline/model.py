@@ -16,18 +16,18 @@ class DragonNetBase(nn.Module):
     outcome_hidden: int
         layer size for conditional outcome layers
     """
-    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, outcome_dropout=0.0):
+    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, shared_dropout = 0.0,  outcome_dropout=0.0):
         super(DragonNetBase, self).__init__()
         self.shared = nn.Sequential(
         nn.Linear(in_features=input_dim, out_features=shared_hidden),
         nn.ReLU(),
-        nn.Dropout(0.0),
+        nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
         nn.ReLU(),
-        nn.Dropout(0.0),
+        nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
         nn.ReLU(),
-        nn.Dropout(0.0)
+        nn.Dropout(shared_dropout)
         )
 
         self.treat_out = nn.Linear(in_features=shared_hidden, out_features=1)

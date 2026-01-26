@@ -1,7 +1,10 @@
 import torch 
+from ziln import zero_inflated_lognormal_pred
 import torch.nn.functional as F
 def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred, T=5):
     #listwise ranking loss
+    y0_pred = zero_inflated_lognormal_pred(y0_pred)
+    y1_pred = zero_inflated_lognormal_pred(y1_pred)
     uplift_pred = y1_pred - y0_pred
     
     if isinstance(y_true, torch.Tensor):
@@ -32,6 +35,9 @@ def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred, T=5):
     
     uplift_loss = - (N0 + N1) * ((1/N1) * torch.sum(y_t * torch.log(softmax_uplift_t)) - (1/N0) * torch.sum(y_c * torch.log(softmax_uplift_c)))
     loss = uplift_loss
+    
+
+    return loss
 
 def response_ranking_loss_log(
     y_t, y1_pred_t, 
