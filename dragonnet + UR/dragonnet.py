@@ -1,9 +1,9 @@
 from model import DragonNetBase, EarlyStopper, dragonnet_loss, QiniEarlyStopper, tarreg_loss
-from ziln import zero_inflated_lognormal_pred
 from metrics import auqc
 import torch 
 import numpy as np
 import copy
+from ranking import uplift_ranking_loss, response_ranking_loss
 
 class Dragonnet:
     def __init__(
@@ -16,46 +16,35 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
         weight_decay = 1e-4,
-        early_stop_metric='qini',
-        rr_lambda = 1e-4,
-        ur_lambda = 10,
-        max_sample = 200,
-        use_ema=True,
+        early_stop_metric='loss',
+        use_ema=False,
         ema_alpha=0.15,
         patience=10,
-        outcome_dropout = 0,
-        shared_dropout = 0
+        early_stop_start_epoch=0,
+        ranking_start_epoch = 0,
+        shared_dropout = 0,
+        outcome_droupout = 0,
+        uplift_ranking = 1.0,
+        response_ranking = 1.0,
+        max_samples = 200
     ):
-        self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, outcome_drop=outcome_dropout, shared_drop=shared_dropout )
+        self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_droupout)
         self.epoch = epochs
-        self.sigma_params = []
-        other_params = []
-
-        for name, param in self.model.named_parameters():
-            if any(k in name for k in ["y0_sigma", "y1_sigma"]):
-                self.sigma_params.append(param)
-            else:
-                other_params.append(param)
-
-        self.optim = torch.optim.Adam([
-            {"params": other_params, "lr": learning_rate},
-            {"params": self.sigma_params, "lr": learning_rate * 0.1}  # 1e-4 nếu base = 1e-3
-        ], weight_decay=weight_decay)
-
-        # self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.alpha = alpha
         self.beta = beta
-        self.early_stop_metric = early_stop_metric
-        self.rr_lambda = rr_lambda
-        self.max_rr_samples = max_sample
-        self.ur_lambda = ur_lambda
-        
+        self.early_stop_metric = early_stop_metric      
+        self.uplift_lambda = uplift_ranking
+        self.rr_lambda = response_ranking     
+        self.max_samples = max_samples  
+        self.ranking_start_epoch = ranking_start_epoch
         # EMA parameters
         self.use_ema = use_ema
         self.ema_alpha = ema_alpha
         self.patience = patience
+        self.early_stop_start_epoch = early_stop_start_epoch
         
         # Tracking cho best model dựa trên Qini score
         self.best_qini = -np.inf
@@ -71,6 +60,7 @@ class Dragonnet:
     def fit(self, train_loader, val_loader):
         print ("🔃🔃🔃Begin training Dragonnet🔃🔃🔃")
         print (f"📊 Early Stop Metric: {self.early_stop_metric.upper()}")
+        print (f"📊 Early Stop Start Epoch: {self.early_stop_start_epoch + 1}")
         
         if self.early_stop_metric == 'qini' and self.use_ema:
             print (f"📊 Strategy: Two-Stage EMA Filter (alpha={self.ema_alpha})")
@@ -81,7 +71,7 @@ class Dragonnet:
         elif self.early_stop_metric == 'loss':
             print (f"📊 Strategy: Train for {self.epoch} epochs, select model with lowest validation loss")
             print (f"   Patience: {self.patience} epochs")
-        
+        # TRAINING LOOP
         for epoch in range(self.epoch):
             self.model.train()
             epoch_loss=0
@@ -95,6 +85,7 @@ class Dragonnet:
                     c_mask = (t_batch.squeeze(1) == 0)
                     self.optim.zero_grad()
                     
+                    #FORWARD PASS
                     y0_pred, y1_pred, t_pred, eps = self.model(x_batch)
                     
                     y_t = y_batch[t_mask]
@@ -105,19 +96,43 @@ class Dragonnet:
 
                     base_loss = dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t_batch, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha)
                     tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred=y0_pred, y1_pred=y1_pred, eps=eps, beta= self.beta)
-                    loss = base_loss + tarreg_reg
+                    
+                    if epoch >= self.ranking_start_epoch:
+                        # Only compute uplift loss if lambda > 0 to avoid unnecessary computation
+                        if self.uplift_lambda > 0 and self.rr_lambda  > 0:
+                            uplift_loss = uplift_ranking_loss(y_true= y_batch, t_true=t_batch , t_pred = t_pred, y0_pred=y0_pred, y1_pred=y1_pred)
+                            response_loss = response_ranking_loss(y_true = y_batch, t_true = t_batch, t_pred = t_pred, y0_pred = y0_pred, y1_pred = y1_pred, max_samples = self.max_samples)
+                            loss = base_loss + tarreg_reg + uplift_loss * self.uplift_lambda + response_loss * self.rr_lambda
+                        elif self.uplift_lambda > 0:
+                            uplift_loss = uplift_ranking_loss(y_true= y_batch, t_true=t_batch , t_pred = t_pred, y0_pred=y0_pred, y1_pred=y1_pred)
+                            response_loss = torch.tensor(0.0)
+                            loss = base_loss + tarreg_reg + uplift_loss * self.uplift_lambda 
+                        elif self.rr_lambda > 0: 
+                            response_loss = response_ranking_loss(y_true = y_batch, t_true = t_batch, t_pred = t_pred, y0_pred = y0_pred, y1_pred = y1_pred, max_samples = self.max_samples)
+                            uplift_loss = torch.tensor(0.0)
+                            loss = base_loss + tarreg_reg + response_loss * self.rr_lambda
+                        else:
+                            uplift_loss = torch.tensor(0.0, device=self.device)  
+                            response_loss = torch.tensor(0.0, device=self.device)  
+                            loss = base_loss + tarreg_reg
+                    else:
+                        loss = base_loss + tarreg_reg
+                        uplift_loss = torch.tensor(0.0, device=self.device)  
+                        response_loss = torch.tensor(0.0, device=self.device)  
+                        
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.sigma_params, max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optim.step()
                     epoch_loss += loss.item()
             
-            # Tính Qini score trên validation set sau mỗi epoch
+            # CALCULATE QINI AND LOSS
             val_qini = self.validate_qini(val_loader)
-            val_loss = self.validate(val_loader)
+            val_loss = self.validate(val_loader, epoch)
             
             # Early stopping based on selected metric
+            
+            # LOSS EARLY STOP
             if self.early_stop_metric == 'loss':
-                # Early stopping dựa trên validation loss
                 if val_loss < self.best_loss:
                     self.best_loss = val_loss
                     self.best_qini = val_qini  # Track qini too for reporting
@@ -130,23 +145,27 @@ class Dragonnet:
                     best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                 
                 if (epoch+1) % 1 == 0:
+                    uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
+                    pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
                         f"Base Loss: {base_loss.item():.4f} | "
                         f"Tarreg Loss: {tarreg_reg.item():.6f} | "
+                        f"{uplift_info}"
+                        f"{pairwise_info}"
                         f"Total Loss: {loss.item():.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
                         f"Val Qini: {val_qini:.4f} {best_marker}"
                     )
                 
-                # Early stopping
-                if self.patience_counter >= self.patience:
+                # ONLY USE EARLYSTOP AFTER N EPOCHS
+                if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
                     print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                     print(f"   No improvement in validation loss for {self.patience} epochs")
                     break
-                    
+              
+            # QINI EARLYSTOP    
             elif self.early_stop_metric == 'qini':
-                # Early stopping dựa trên Qini score
                 if self.use_ema:
                     # Two-Stage Strategy: EMA as noise filter, raw Qini determines peak
                     
@@ -179,24 +198,28 @@ class Dragonnet:
                         best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                     
                     if (epoch+1) % 1 == 0:
+                        uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
+                        pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
                         print(
                             f"Epoch {epoch+1}/{self.epoch} | "
                             f"Base Loss: {base_loss.item():.4f} | "
                             f"Tarreg Loss: {tarreg_reg.item():.6f} | "
+                            f"{uplift_info}"
+                            f"{pairwise_info}"
                             f"Total Loss: {loss.item():.4f} | "
                             f"Val Loss: {val_loss:.4f} | "
-                            f"Raw Qini: {val_qini:.4f} | "
+                            f"Val Qini: {val_qini:.4f} {best_marker}"
                             f"EMA Trend: {self.ema_qini:.4f} | "
                             f"{best_marker}"
                         )
                     
-                    # Early stopping based on patience
-                    if self.patience_counter >= self.patience:
+                    # Early stopping based on patience (only after early_stop_start_epoch)
+                    if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
                         print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                         print(f"   No valid peak (raw ≥ trend) found in last {self.patience} epochs")
                         break
                 else:
-                    # Original: track raw Qini only
+                    # Original: track raw Qini
                     if val_qini > self.best_qini:
                         self.best_qini = val_qini
                         self.best_epoch = epoch
@@ -206,16 +229,20 @@ class Dragonnet:
                         best_marker = ""
                         
                     if (epoch+1) % 1 == 0:
+                        uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
+                        pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
                         print(
                             f"Epoch {epoch+1}/{self.epoch} | "
                             f"Base Loss: {base_loss.item():.4f} | "
                             f"Tarreg Loss: {tarreg_reg.item():.6f} | "
+                            f"{uplift_info}"
+                            f"{pairwise_info}"
                             f"Total Loss: {loss.item():.4f} | "
                             f"Val Loss: {val_loss:.4f} | "
                             f"Val Qini: {val_qini:.4f} {best_marker}"
                         )
         
-        # Khôi phục model về epoch tốt nhất
+        # RESTORE BEST MODEL
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
             if self.early_stop_metric == 'loss':
@@ -231,8 +258,8 @@ class Dragonnet:
                 print(f"\n✅ Training completed! Restored model to epoch {self.best_epoch+1} with best Qini score: {self.best_qini:.4f}")
         else:
             print(f"\n⚠️ No valid model state saved. Using final epoch model.")
-    def validate(self, val_loader):
-
+            
+    def validate(self, val_loader, epoch):
         self.model.eval()
         val_loss=0
         with torch.no_grad():
@@ -245,12 +272,33 @@ class Dragonnet:
                 y_t = y[t_mask]
                 y_c = y[c_mask]
 
-                y0_pred_t = y0[t_mask]
                 y0_pred_c = y0[c_mask]
                 y1_pred_t = y1[t_mask]
-                y1_pred_c = y1[c_mask]
 
-                val_loss += dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha).item()
+                base_loss = dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha)
+                tarreg_reg = tarreg_loss(y_true= y, t_true= t , t_pred = t_pred, y0_pred=y0, y1_pred=y1, eps=eps, beta= self.beta)
+                if epoch >= self.ranking_start_epoch:
+                    if self.uplift_lambda > 0 and self.rr_lambda  > 0:
+                        uplift_loss = uplift_ranking_loss(y_true= y, t_true=t , t_pred = t_pred, y0_pred=y0, y1_pred=y1)
+                        response_loss = response_ranking_loss(y_true = y, t_true = t, t_pred = t_pred, y0_pred = y0, y1_pred = y1, max_samples = self.max_samples)
+                        loss = base_loss + tarreg_reg + uplift_loss * self.uplift_lambda + response_loss * self.rr_lambda
+                    elif self.uplift_lambda > 0:
+                        uplift_loss = uplift_ranking_loss(y_true= y, t_true=t , t_pred = t_pred, y0_pred=y0, y1_pred=y1)
+                        response_loss = torch.tensor(0.0)
+                        loss = base_loss + tarreg_reg + uplift_loss * self.uplift_lambda 
+                    elif self.rr_lambda > 0: 
+                        response_loss = response_ranking_loss(y_true = y, t_true = t, t_pred = t_pred, y0_pred = y0, y1_pred = y1, max_samples = self.max_samples)
+                        uplift_loss = torch.tensor(0.0)
+                        loss = base_loss + tarreg_reg + response_loss * self.rr_lambda
+                    else:
+                        uplift_loss = torch.tensor(0.0, device=self.device)  
+                        response_loss = torch.tensor(0.0, device=self.device)  
+                        loss = base_loss + tarreg_reg
+                else:
+                    loss = base_loss + tarreg_reg
+                    uplift_loss = torch.tensor(0.0, device=self.device)  
+                    response_loss = torch.tensor(0.0, device=self.device)  
+                val_loss += loss  
         return val_loss / len(val_loader)
     
     def validate_qini(self, val_loader):
@@ -265,10 +313,6 @@ class Dragonnet:
                 x = x.to(self.device)
                 y0_pred, y1_pred, t_pred, eps = self.model(x)
                 
-                # Chuyển đổi ZILN predictions
-                y0_pred = zero_inflated_lognormal_pred(y0_pred)
-                y1_pred = zero_inflated_lognormal_pred(y1_pred)
-                
                 # Tính uplift
                 uplift = (y1_pred - y0_pred).cpu().numpy()
                 
@@ -281,7 +325,7 @@ class Dragonnet:
             y_true=np.array(y_true_list),
             t_true=np.array(t_true_list),
             uplift_pred=np.array(uplift_list),
-            bins=100,  # Giảm số bins để nhanh hơn
+            bins=100,  
             plot=False
         )
         
@@ -292,8 +336,6 @@ class Dragonnet:
         x = torch.tensor(x, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             y0_pred, y1_pred, t_pred, eps = self.model(x)
-            y0_pred = zero_inflated_lognormal_pred(y0_pred)
-            y1_pred = zero_inflated_lognormal_pred(y1_pred)
         return y0_pred, y1_pred, t_pred, eps
             
 # Xem uplift của một cá nhân bất kỳ

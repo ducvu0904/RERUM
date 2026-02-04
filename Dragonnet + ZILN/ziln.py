@@ -33,7 +33,7 @@ def zero_inflated_lognormal_loss(target, prediction):
         
         positive_target = (target >0).float()
         
-        cls_loss = F.binary_cross_entropy_with_logits(logit_p, positive_target, reduction = "none")
+        cls_loss = F.binary_cross_entropy_with_logits(logit_p, positive_target, reduction = "mean")
         #masking
         positive_mask = (target > 0).squeeze()
         
@@ -48,10 +48,11 @@ def zero_inflated_lognormal_loss(target, prediction):
             # print (f"sigma positive = {sigma_positive}")
             target_log = torch.log(target_positive)
             
-            val_loss = (torch.log(sigma_positive) + 0.5 * torch.pow((target_log - mu_positive)/ sigma_positive, 2))
-            reg_loss_sum = val_loss.sum()
+            # Correct Log-Normal NLL: log(sigma) + log(y) + 0.5*log(2*pi) + 0.5*((log(y)-mu)/sigma)^2
+            val_loss = (torch.log(sigma_positive) + target_log + 0.5 * np.log(2 * np.pi) + 0.5 * torch.pow((target_log - mu_positive)/ sigma_positive, 2))
+            reg_loss_sum = val_loss.mean()
             
         # print (f"classification: {cls_loss[:5]} | regression: {reg_loss_sum[:5]}")
 
-        total_loss = (cls_loss.sum() + reg_loss_sum)
+        total_loss = (cls_loss + reg_loss_sum)
         return total_loss
