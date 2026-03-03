@@ -82,25 +82,7 @@ def outcome_loss(y_t, y_c, y0_pred, y1_pred):
     loss = (loss_0 +  loss_1)
     
     return loss
-
-def tarreg_loss(y_true, t_true, t_pred, y0_pred, y1_pred, eps, beta=1.0):
-    
-    # Targeted regularization
-    t_pred_clipped = (t_pred + 0.01) / 1.02
-    
-    y_pred = t_true * y1_pred + (1-t_true) * y0_pred
-    
-    h= (t_true/t_pred_clipped) - ((1-t_true)/ (1-t_pred_clipped))
-    
-    y_pert = y_pred + eps * h 
-    targeted_regularization = torch.mean((y_true-y_pert)**2)
-    
-    loss = beta * targeted_regularization
-    
-    return loss
-    
-
-        
+           
 class EarlyStopper:
     def __init__(self, patience=15, min_delta=0):
         self.patience = patience

@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from ranking import uplift_ranking_loss
 
 class DragonNetBase(nn.Module):
     """

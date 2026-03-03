@@ -38,21 +38,19 @@ def zero_inflated_lognormal_loss(target, prediction):
         positive_mask = (target > 0).squeeze()
         
         if positive_mask.sum()==0:
-            reg_loss_sum = torch.tensor(0.0, device=prediction.device)
+            reg_loss_mean = torch.tensor(0.0, device=prediction.device)
         else: 
             target_positive = target[positive_mask]
             mu_positive = prediction[positive_mask, 1].unsqueeze(1)
             raw_sigma_positive = prediction[positive_mask, 2].unsqueeze(1)
             sigma_positive = F.softplus(raw_sigma_positive) + 1e-3
-            sigma_positive = torch.clamp(sigma_positive, max=4.0)
-            # print (f"sigma positive = {sigma_positive}")
             target_log = torch.log(target_positive)
             
             # Correct Log-Normal NLL: log(sigma) + log(y) + 0.5*log(2*pi) + 0.5*((log(y)-mu)/sigma)^2
-            val_loss = (torch.log(sigma_positive) + target_log + 0.5 * np.log(2 * np.pi) + 0.5 * torch.pow((target_log - mu_positive)/ sigma_positive, 2))
-            reg_loss_sum = val_loss.mean()
+            val_loss =  torch.log(sigma_positive) + 0.5 * ((target_log - mu_positive)/ sigma_positive)**2 + target_log
+            reg_loss_mean = val_loss.mean()
             
         # print (f"classification: {cls_loss[:5]} | regression: {reg_loss_sum[:5]}")
 
-        total_loss = (cls_loss + reg_loss_sum)
+        total_loss = (cls_loss + reg_loss_mean)
         return total_loss

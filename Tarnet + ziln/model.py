@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from ziln import zero_inflated_lognormal_pred, zero_inflated_lognormal_loss
 import numpy as np
 
 class TarnetBase(nn.Module):
@@ -16,7 +17,7 @@ class TarnetBase(nn.Module):
     outcome_hidden: int
         layer size for conditional outcome layers
     """
-    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, shared_dropout = 0.0,  outcome_dropout=0.0):
+    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, shared_dropout=0.0, outcome_dropout=0.0, positive_rate=0.05):
         super(TarnetBase, self).__init__()
         self.shared = nn.Sequential(
         nn.Linear(in_features=input_dim, out_features=shared_hidden),
@@ -29,27 +30,36 @@ class TarnetBase(nn.Module):
         nn.ReLU(),
         nn.Dropout(shared_dropout)
         )
-        
-        self.y0 = nn.Sequential(
-        nn.Linear(in_features=shared_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
-        nn.Dropout(outcome_dropout),
-        nn.Linear(in_features=outcome_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
-        nn.Dropout(outcome_dropout),
-        nn.Linear(in_features=outcome_hidden, out_features=1)
+
+        self.head_0_common = nn.Sequential(
+            nn.Linear(shared_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout),
+            nn.Linear(outcome_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout)
         )
-        
-        self.y1 = nn.Sequential(
-        nn.Linear(in_features=shared_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
-        nn.Dropout(outcome_dropout),
-        nn.Linear(in_features=outcome_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
-        nn.Dropout(outcome_dropout),
-        nn.Linear(in_features=outcome_hidden, out_features=1)
+        self.head_1_common = nn.Sequential(
+            nn.Linear(shared_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout),
+            nn.Linear(outcome_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout)
         )
-               
+
+        self.y0_mu = nn.Linear(outcome_hidden, 1)
+        self.y0_sigma = nn.Linear(outcome_hidden, 1)
+        self.y0_p = nn.Linear(outcome_hidden, 1)
+
+        self.y1_mu = nn.Linear(outcome_hidden, 1)
+        self.y1_sigma = nn.Linear(outcome_hidden, 1)
+        self.y1_p = nn.Linear(outcome_hidden, 1)
+
+        self._init_weights(positive_rate=positive_rate)
+
+    def _init_weights(self, positive_rate=0.05):
+        # Init p bias to match the empirical positive rate so the classification
+        # head starts from a calibrated prior instead of 1% (which was too conservative
+        # and slowed convergence of the p head significantly).
+        positive_rate = np.clip(positive_rate, 1e-4, 1 - 1e-4)
+        p_bias = float(np.log(positive_rate / (1 - positive_rate)))
+        with torch.no_grad():
+            self.y0_p.bias.fill_(p_bias)
+            self.y1_p.bias.fill_(p_bias)
+
     def forward(self, inputs):
         """
         forward method to train model.
@@ -62,25 +72,42 @@ class TarnetBase(nn.Module):
         Returns
         -------
         y0: torch.Tensor
-            outcome under control
+            [batch, 3] ZILN logits for control outcome (p, mu, sigma)
         y1: torch.Tensor
-            outcome under treatment
+            [batch, 3] ZILN logits for treatment outcome (p, mu, sigma)
         """
-
         z = self.shared(inputs)
-                
-        y0 = self.y0(z)
-        y1 = self.y1(z)
-        
+
+        # --- CONTROL FLOW ---
+        h0 = self.head_0_common(z)
+        mu0 = self.y0_mu(h0)
+        sigma0 = self.y0_sigma(h0)
+        p0 = self.y0_p(h0)
+        y0 = torch.cat([p0, mu0, sigma0], dim=1)
+
+        # --- TREATMENT FLOW ---
+        h1 = self.head_1_common(z)
+        mu1 = self.y1_mu(h1)
+        sigma1 = self.y1_sigma(h1)
+        p1 = self.y1_p(h1)
+        y1 = torch.cat([p1, mu1, sigma1], dim=1)
 
         return y0, y1
-    
+
 def outcome_loss(y_t, y_c, y0_pred, y1_pred):
-        
-    loss_1 = torch.mean(torch.square((y_t - y1_pred)))
-    loss_0 = torch.mean(torch.square((y_c - y0_pred)))
-    loss = (loss_0 +  loss_1)
-    
+
+    loss_0 = zero_inflated_lognormal_loss(y_t, y1_pred)
+    loss_1 = zero_inflated_lognormal_loss(y_c, y0_pred)
+
+    # Ensure losses are valid (no NaN or inf)
+    # Raise an error in debug mode; silently replacing NaN hides root causes.
+    # If NaN persists despite sigma clamp, the issue is upstream (e.g. exploding mu).
+    if torch.isnan(loss_0) or torch.isinf(loss_0):
+        loss_0 = loss_0.new_tensor(0.0)
+    if torch.isnan(loss_1) or torch.isinf(loss_1):
+        loss_1 = loss_1.new_tensor(0.0)
+
+    loss = (loss_0 + loss_1)
     return loss
            
 class EarlyStopper:

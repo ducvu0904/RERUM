@@ -23,26 +23,13 @@ class Dragonnet:
         use_ema=True,
         ema_alpha=0.15,
         patience=10,
+        early_stop_start_epoch=0,
         outcome_dropout = 0,
         shared_dropout = 0
     ):
         self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, outcome_drop=outcome_dropout, shared_drop=shared_dropout )
         self.epoch = epochs
-        self.sigma_params = []
-        other_params = []
-
-        for name, param in self.model.named_parameters():
-            if any(k in name for k in ["y0_sigma", "y1_sigma"]):
-                self.sigma_params.append(param)
-            else:
-                other_params.append(param)
-
-        self.optim = torch.optim.Adam([
-            {"params": other_params, "lr": learning_rate},
-            {"params": self.sigma_params, "lr": learning_rate * 0.1}  # 1e-4 nếu base = 1e-3
-        ], weight_decay=weight_decay)
-
-        # self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.alpha = alpha
@@ -56,6 +43,7 @@ class Dragonnet:
         self.use_ema = use_ema
         self.ema_alpha = ema_alpha
         self.patience = patience
+        self.early_stop_start_epoch = early_stop_start_epoch
         
         # Tracking cho best model dựa trên Qini score
         self.best_qini = -np.inf
@@ -71,6 +59,7 @@ class Dragonnet:
     def fit(self, train_loader, val_loader):
         print ("🔃🔃🔃Begin training Dragonnet🔃🔃🔃")
         print (f"📊 Early Stop Metric: {self.early_stop_metric.upper()}")
+        print (f"📊 Early Stop Start Epoch: {self.early_stop_start_epoch + 1}")
         
         if self.early_stop_metric == 'qini' and self.use_ema:
             print (f"📊 Strategy: Two-Stage EMA Filter (alpha={self.ema_alpha})")
@@ -107,7 +96,7 @@ class Dragonnet:
                     tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred=y0_pred, y1_pred=y1_pred, eps=eps, beta= self.beta)
                     loss = base_loss + tarreg_reg
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.sigma_params, max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optim.step()
                     epoch_loss += loss.item()
             
@@ -139,8 +128,8 @@ class Dragonnet:
                         f"Val Qini: {val_qini:.4f} {best_marker}"
                     )
                 
-                # Early stopping
-                if self.patience_counter >= self.patience:
+                # ONLY USE EARLYSTOP AFTER N EPOCHS
+                if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
                     print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                     print(f"   No improvement in validation loss for {self.patience} epochs")
                     break
@@ -190,8 +179,8 @@ class Dragonnet:
                             f"{best_marker}"
                         )
                     
-                    # Early stopping based on patience
-                    if self.patience_counter >= self.patience:
+                    # Early stopping based on patience (only after early_stop_start_epoch)
+                    if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
                         print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                         print(f"   No valid peak (raw ≥ trend) found in last {self.patience} epochs")
                         break

@@ -56,39 +56,7 @@ class DragonNetBase(nn.Module):
         
         self.epsilon = nn.Linear(in_features=1, out_features=1)
         torch.nn.init.xavier_normal_(self.epsilon.weight)
-        
-    def _init_weights(self):
-        # 1. Khởi tạo chung cho toàn bộ module (Xavier)
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-        # 2. Khởi tạo BIAS riêng cho các nhánh (Quan trọng)
-        # Thay vì dùng _init_head_bias cũ, ta set trực tiếp
-        
-        # --- CONTROL HEADS ---
-        # Set P bias = -4.6 (để xác suất ban đầu ~ 1%)
-        if self.y0_p.bias is not None:
-            with torch.no_grad():
-                self.y0_p.bias.fill_(-4.6)
-        
-        # Set Sigma bias = 0.5 (để sigma ban đầu ổn định)
-        if self.y0_sigma.bias is not None:
-             with torch.no_grad():
-                self.y0_sigma.bias.fill_(0.5)
-
-        # --- TREATMENT HEADS ---
-        # Tương tự cho Treatment
-        if self.y1_p.bias is not None:
-            with torch.no_grad():
-                self.y1_p.bias.fill_(-4.6)
-                
-        if self.y1_sigma.bias is not None:
-             with torch.no_grad():
-                self.y1_sigma.bias.fill_(0.5)
-                
+           
     def forward(self, inputs):
         z = self.shared(inputs)
         t_pred = torch.sigmoid(self.treat_out(z))
@@ -121,6 +89,11 @@ def dragonnet_loss(y_t, y_c, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0):
     
     loss_0 = zero_inflated_lognormal_loss(y_t, y1_pred)
     loss_1 = zero_inflated_lognormal_loss(y_c, y0_pred)
+    
+    # Ensure losses are valid (no NaN or inf)
+    loss_0 = torch.where(torch.isnan(loss_0) | torch.isinf(loss_0), torch.tensor(0.0, device=loss_0.device), loss_0)
+    loss_1 = torch.where(torch.isnan(loss_1) | torch.isinf(loss_1), torch.tensor(0.0, device=loss_1.device), loss_1)
+    
     loss_y = (loss_0 +  loss_1)
     # print (f"lossy = {loss_y} ") 
 

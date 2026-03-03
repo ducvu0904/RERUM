@@ -47,7 +47,7 @@ class CFRBase (nn.Module):
         
         y0 = self.head_0(z)
         
-        return z, y1, y0
+        return z, y0, y1
     
 def compute_ipm_loss(shared_layer, t_true, method = "mmd_rbf", alpha = 1.0):
     if alpha ==0: 

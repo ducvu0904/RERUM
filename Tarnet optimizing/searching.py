@@ -36,16 +36,16 @@ def train_and_evaluate_single_seed(
     seed,
     train_loader,
     val_loader,
-    x_test_tensor,
-    y_test_tensor,
-    t_test_tensor,
+    x_val_tensor,
+    y_val_tensor,
+    t_val_tensor,
     input_dim,
     uplift_lambda,
     response_lambda,
     verbose=True
 ):
     """
-    Train model with a single seed and return AUQC score.
+    Train model with a single seed and return AUQC score on VALIDATION set.
     
     Parameters
     ----------
@@ -55,12 +55,12 @@ def train_and_evaluate_single_seed(
         Training data loader
     val_loader : DataLoader
         Validation data loader
-    x_test_tensor : torch.Tensor
-        Test features tensor
-    y_test_tensor : torch.Tensor
-        Test target tensor
-    t_test_tensor : torch.Tensor
-        Test treatment tensor
+    x_val_tensor : torch.Tensor
+        Validation features tensor (for evaluation)
+    y_val_tensor : torch.Tensor
+        Validation target tensor (for evaluation)
+    t_val_tensor : torch.Tensor
+        Validation treatment tensor (for evaluation)
     input_dim : int
         Input dimension for the model
     uplift_lambda : float
@@ -73,7 +73,7 @@ def train_and_evaluate_single_seed(
     Returns
     -------
     float
-        AUQC score on test set
+        AUQC score on VALIDATION set (to avoid data leakage)
     """
     # Fixed hyperparameters
     epochs = 150
@@ -130,17 +130,17 @@ def train_and_evaluate_single_seed(
         if not verbose:
             sys.stdout = old_stdout
     
-    # Evaluate on test set
+    # Evaluate on VALIDATION set (not test set to avoid data leakage)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x_test_on_device = x_test_tensor.to(device)
+    x_val_on_device = x_val_tensor.to(device)
     
-    y0_pred, y1_pred = model.predict(x_test_on_device)
+    y0_pred, y1_pred = model.predict(x_val_on_device)
     uplift_pred = (y1_pred - y0_pred).cpu().numpy().flatten()
     
-    y_true = y_test_tensor.cpu().numpy().flatten()
-    t_true = t_test_tensor.cpu().numpy().flatten()
+    y_true = y_val_tensor.cpu().numpy().flatten()
+    t_true = t_val_tensor.cpu().numpy().flatten()
     
-    # Calculate AUQC (without plotting)
+    # Calculate AUQC on validation set (without plotting)
     auqc_score = auqc(y_true, t_true, uplift_pred, bins=100, plot=False)
     
     return auqc_score
@@ -150,9 +150,9 @@ def objective(
     trial,
     train_loader,
     val_loader,
-    x_test_tensor,
-    y_test_tensor,
-    t_test_tensor,
+    x_val_tensor,
+    y_val_tensor,
+    t_val_tensor,
     input_dim,
     seeds=[412312, 42, 1874, 902745, 1],
     verbose=True
@@ -168,12 +168,12 @@ def objective(
         Training data loader
     val_loader : DataLoader
         Validation data loader
-    x_test_tensor : torch.Tensor
-        Test features tensor
-    y_test_tensor : torch.Tensor
-        Test target tensor
-    t_test_tensor : torch.Tensor
-        Test treatment tensor
+    x_val_tensor : torch.Tensor
+        Validation features tensor (for evaluation)
+    y_val_tensor : torch.Tensor
+        Validation target tensor (for evaluation)
+    t_val_tensor : torch.Tensor
+        Validation treatment tensor (for evaluation)
     input_dim : int
         Input dimension for the model
     seeds : list
@@ -184,7 +184,7 @@ def objective(
     Returns
     -------
     float
-        Mean AUQC score across all seeds
+        Mean AUQC score on validation set across all seeds
     """
     # Sample hyperparameters (log scale for wide ranges)
     uplift_lambda = trial.suggest_float("uplift_lambda", 0.1, 100.0, log=True)
@@ -207,9 +207,9 @@ def objective(
             seed=seed,
             train_loader=train_loader,
             val_loader=val_loader,
-            x_test_tensor=x_test_tensor,
-            y_test_tensor=y_test_tensor,
-            t_test_tensor=t_test_tensor,
+            x_val_tensor=x_val_tensor,
+            y_val_tensor=y_val_tensor,
+            t_val_tensor=t_val_tensor,
             input_dim=input_dim,
             uplift_lambda=uplift_lambda,
             response_lambda=response_lambda,
@@ -235,9 +235,9 @@ def objective(
 def optimize_tarnet(
     train_loader,
     val_loader,
-    x_test_tensor,
-    y_test_tensor,
-    t_test_tensor,
+    x_val_tensor,
+    y_val_tensor,
+    t_val_tensor,
     input_dim,
     n_trials=30,
     seeds=[412312, 42, 1874, 902745, 1],
@@ -247,18 +247,21 @@ def optimize_tarnet(
     """
     Run Optuna optimization for Tarnet model.
     
+    NOTE: Optimization is done on VALIDATION set to avoid data leakage.
+    After finding best parameters, evaluate on TEST set separately.
+    
     Parameters
     ----------
     train_loader : DataLoader
         Training data loader
     val_loader : DataLoader
         Validation data loader
-    x_test_tensor : torch.Tensor
-        Test features tensor
-    y_test_tensor : torch.Tensor
-        Test target tensor
-    t_test_tensor : torch.Tensor
-        Test treatment tensor
+    x_val_tensor : torch.Tensor
+        Validation features tensor (for optimization metric)
+    y_val_tensor : torch.Tensor
+        Validation target tensor (for optimization metric)
+    t_val_tensor : torch.Tensor
+        Validation treatment tensor (for optimization metric)
     input_dim : int
         Input dimension for the model
     n_trials : int
@@ -277,18 +280,20 @@ def optimize_tarnet(
         
     Example
     -------
+    >>> # Optimize on validation set
     >>> study = optimize_tarnet(
     ...     train_loader=train_loader,
     ...     val_loader=val_loader,
-    ...     x_test_tensor=x_men_test_t,
-    ...     y_test_tensor=y_men_test_t,
-    ...     t_test_tensor=t_men_test_t,
+    ...     x_val_tensor=x_men_val_t,
+    ...     y_val_tensor=y_men_val_t,
+    ...     t_val_tensor=t_men_val_t,
     ...     input_dim=x_men_train_t.shape[1],
     ...     n_trials=30,
     ...     verbose=True
     ... )
     >>> print(f"Best parameters: {study.best_params}")
-    >>> print(f"Best AUQC: {study.best_value}")
+    >>> print(f"Best Val AUQC: {study.best_value}")
+    >>> # Then evaluate best params on TEST set separately
     """
     
     print("=" * 70)
@@ -298,7 +303,8 @@ def optimize_tarnet(
     print(f"   - Number of trials: {n_trials}")
     print(f"   - Seeds per trial: {len(seeds)} {seeds}")
     print(f"   - Total model trainings: {n_trials * len(seeds)}")
-    print(f"   - Metric to maximize: AUQC")
+    print(f"   - Metric to maximize: AUQC (on VALIDATION set)")
+    print(f"   ⚠️  Using validation set for optimization (no data leakage)")
     print(f"\n📋 Search Space:")
     print(f"   - uplift_lambda: [0.1, 100.0] (log scale)")
     print(f"   - response_lambda: [1e-3, 10.0] (log scale)")
@@ -325,9 +331,9 @@ def optimize_tarnet(
             trial=trial,
             train_loader=train_loader,
             val_loader=val_loader,
-            x_test_tensor=x_test_tensor,
-            y_test_tensor=y_test_tensor,
-            t_test_tensor=t_test_tensor,
+            x_val_tensor=x_val_tensor,
+            y_val_tensor=y_val_tensor,
+            t_val_tensor=t_val_tensor,
             input_dim=input_dim,
             seeds=seeds,
             verbose=verbose
@@ -351,7 +357,8 @@ def optimize_tarnet(
     print("🏆 OPTIMIZATION COMPLETE!")
     print("=" * 70)
     print(f"\n📊 Best Trial: #{study.best_trial.number + 1}")
-    print(f"   Best Mean AUQC: {study.best_value:.4f}")
+    print(f"   Best Mean AUQC (Validation): {study.best_value:.4f}")
+    print(f"   ⚠️  Remember to evaluate on TEST set with best params!")
     print(f"\n🎯 Best Parameters:")
     print(f"   uplift_lambda: {study.best_params['uplift_lambda']:.6f}")
     print(f"   response_lambda: {study.best_params['response_lambda']:.6f}")
@@ -375,4 +382,6 @@ if __name__ == "__main__":
     print("Import and use optimize_tarnet() function from a notebook.")
     print("\nExample usage:")
     print("  from searching import optimize_tarnet")
-    print("  study = optimize_tarnet(train_loader, val_loader, x_test, y_test, t_test, input_dim)")
+    print("  # Optimize on VALIDATION set (no data leakage)")
+    print("  study = optimize_tarnet(train_loader, val_loader, x_val, y_val, t_val, input_dim)")
+    print("  # Then evaluate best params on TEST set separately")
