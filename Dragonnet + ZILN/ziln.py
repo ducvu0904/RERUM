@@ -19,7 +19,6 @@ def zero_inflated_lognormal_pred(logits):
     p = torch.sigmoid(logits[..., :1])
     mu = logits[..., 1:2]
     sigma = torch.nn.functional.softplus(logits[..., 2:]) + 1e-3
-    sigma = torch.clamp(sigma, 1e-4, 4.0)
     # E[y|y>0] = exp(mu + sigma^2/2)
     log_mean = torch.clamp(mu + 0.5 * sigma.pow(2), max= 1000)
     expected_given_positive = torch.exp(log_mean)

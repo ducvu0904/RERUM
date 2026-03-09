@@ -96,8 +96,8 @@ class TarnetBase(nn.Module):
 
 def outcome_loss(y_t, y_c, y0_pred, y1_pred):
 
-    loss_0 = zero_inflated_lognormal_loss(y_t, y1_pred)
-    loss_1 = zero_inflated_lognormal_loss(y_c, y0_pred)
+    loss_0, cls_loss_0, reg_loss_0, mu_mean_t, sigma_mean_t = zero_inflated_lognormal_loss(y_t, y1_pred)
+    loss_1, cls_loss_1, reg_loss_1, mu_mean_c, sigma_mean_c = zero_inflated_lognormal_loss(y_c, y0_pred)
 
     # Ensure losses are valid (no NaN or inf)
     # Raise an error in debug mode; silently replacing NaN hides root causes.
@@ -108,7 +108,9 @@ def outcome_loss(y_t, y_c, y0_pred, y1_pred):
         loss_1 = loss_1.new_tensor(0.0)
 
     loss = (loss_0 + loss_1)
-    return loss
+    cls_loss = cls_loss_0 + cls_loss_1
+    reg_loss = reg_loss_0 + reg_loss_1
+    return loss, cls_loss, reg_loss, mu_mean_t, sigma_mean_t, mu_mean_c, sigma_mean_c
            
 class EarlyStopper:
     def __init__(self, patience=15, min_delta=0):

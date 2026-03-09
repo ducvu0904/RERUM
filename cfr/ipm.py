@@ -51,9 +51,11 @@ def wasserstein(x, t_true, p=0.5, lamba = 1, iterations=10):
     if N1==0 or N0==0:  
         return 0
     
+    device = x.device  # Get device from input tensor
+    
     M = torch.norm(x_treat[:, None] - x_control, dim=2)**2
-    a = p * torch.ones((N1, 1)) / N1
-    b = (1 - p) * torch.ones((N0, 1)) / N0
+    a = p * torch.ones((N1, 1), device=device) / N1
+    b = (1 - p) * torch.ones((N0, 1), device=device) / N0
     
     k = torch.exp(-lamba * M)
     k_tilde = k/a

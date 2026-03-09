@@ -51,6 +51,8 @@ class Tarnet:
         # EMA tracking
         self.ema_qini = None
         self.best_ema_qini = -np.inf
+        self.best_ema_epoch = 0
+        self.best_ema_model_state = None
         self.patience_counter = 0
 
     def fit(self, train_loader, val_loader):
@@ -58,7 +60,11 @@ class Tarnet:
         print (f"📊 Early Stop Metric: {self.early_stop_metric.upper()}")
         print (f"📊 Early Stop Start Epoch: {self.early_stop_start_epoch + 1}")
         
-        if self.early_stop_metric == 'qini' and self.use_ema:
+        if self.early_stop_metric == 'ema_qini':
+            print (f"📊 Strategy: Best EMA Qini (alpha={self.ema_alpha})")
+            print (f"   Restore to epoch with highest smoothed (EMA) Qini score")
+            print (f"   Patience: {self.patience} epochs")
+        elif self.early_stop_metric == 'qini' and self.use_ema:
             print (f"📊 Strategy: Two-Stage EMA Filter (alpha={self.ema_alpha})")
             print (f"   EMA filters noise spikes, Raw Qini determines peak height")
             print (f"   Select checkpoint: raw_qini is highest AND raw_qini >= ema_qini")
@@ -126,8 +132,50 @@ class Tarnet:
             
             # Early stopping based on selected metric
             
+            # EMA QINI EARLY STOP
+            if self.early_stop_metric == 'ema_qini':
+                # Update EMA
+                if self.ema_qini is None:
+                    self.ema_qini = val_qini
+                else:
+                    self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
+                
+                # Track best EMA Qini (always track, patience only after early_stop_start_epoch)
+                if self.ema_qini > self.best_ema_qini:
+                    self.best_ema_qini = self.ema_qini
+                    self.best_ema_epoch = epoch
+                    self.best_ema_model_state = copy.deepcopy(self.model.state_dict())
+                    self.best_qini = val_qini  # Track raw qini at this epoch too
+                    self.patience_counter = 0
+                    best_marker = "⭐ NEW BEST EMA"
+                else:
+                    if epoch >= self.early_stop_start_epoch:
+                        self.patience_counter += 1
+                    best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                
+                if (epoch+1) % 1 == 0:
+                    uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
+                    pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
+                    print(
+                        f"Epoch {epoch+1}/{self.epoch} | "
+                        f"Base Loss: {base_loss.item():.4f} | "
+                        f"{uplift_info}"
+                        f"{pairwise_info}"
+                        f"Total Loss: {loss.item():.4f} | "
+                        f"Val Loss: {val_loss:.4f} | "
+                        f"Val Qini: {val_qini:.4f} | "
+                        f"EMA Qini: {self.ema_qini:.4f} | "
+                        f"Best EMA: {self.best_ema_qini:.4f} {best_marker}"
+                    )
+                
+                # Early stopping based on patience
+                if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
+                    print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
+                    print(f"   No improvement in EMA Qini for {self.patience} epochs")
+                    break
+            
             # LOSS EARLY STOP
-            if self.early_stop_metric == 'loss':
+            elif self.early_stop_metric == 'loss':
                 if val_loss < self.best_loss:
                     self.best_loss = val_loss
                     self.best_qini = val_qini  # Track qini too for reporting
@@ -235,7 +283,13 @@ class Tarnet:
                         )
         
         # RESTORE BEST MODEL
-        if self.best_model_state is not None:
+        if self.early_stop_metric == 'ema_qini' and self.best_ema_model_state is not None:
+            self.model.load_state_dict(self.best_ema_model_state)
+            print(f"\n✅ Training completed! Restored model to epoch {self.best_ema_epoch+1}")
+            print(f"   Best EMA Qini: {self.best_ema_qini:.4f}")
+            print(f"   Raw Qini at best EMA epoch: {self.best_qini:.4f}")
+            print(f"   Strategy: Selected epoch with highest smoothed (EMA) Qini")
+        elif self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
             if self.early_stop_metric == 'loss':
                 print(f"\n✅ Training completed! Restored model to epoch {self.best_epoch+1}")
@@ -250,6 +304,8 @@ class Tarnet:
                 print(f"\n✅ Training completed! Restored model to epoch {self.best_epoch+1} with best Qini score: {self.best_qini:.4f}")
         else:
             print(f"\n⚠️ No valid model state saved. Using final epoch model.")
+            if self.early_stop_metric == 'ema_qini':
+                print(f"   Final EMA Qini: {self.ema_qini:.4f}" if self.ema_qini is not None else "   EMA not initialized")
             
     def validate(self, val_loader, epoch):
         self.model.eval()
@@ -289,7 +345,7 @@ class Tarnet:
                     loss = base_loss
                     uplift_loss = torch.tensor(0.0, device=self.device)  
                     response_loss = torch.tensor(0.0, device=self.device)  
-                val_loss += loss  
+                val_loss += loss 
         return val_loss / len(val_loader)
     
     def validate_qini(self, val_loader):

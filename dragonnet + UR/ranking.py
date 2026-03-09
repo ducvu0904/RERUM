@@ -1,3 +1,4 @@
+
 import torch 
 import torch.nn.functional as F
 
@@ -113,7 +114,7 @@ def cross_group_ranking_loss_with_count(pred_i, true_i, pred_j, true_j, max_samp
     return loss, total_possible_pairs
 
 
-def response_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred, max_samples=200):
+def response_ranking_loss(y_true, t_true, y0_pred, y1_pred, max_samples=200):
     """
     Response ranking loss với intra-group và cross-group comparisons theo paper.
     """
@@ -211,7 +212,7 @@ def response_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred, max_samples=
     return normalized_loss
 
 
-def uplift_ranking_loss(y_true, t_true, t_pred, y0_pred, y1_pred):
+def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred):
     """Listwise uplift ranking loss"""
     uplift_pred = y1_pred - y0_pred
     
