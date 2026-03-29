@@ -92,7 +92,7 @@ def dragonnet_loss(y_t, y_c, t_true, t_pred, y0_pred, y1_pred, eps, alpha=1.0):
     
     loss_1 = torch.mean(torch.square((y_t - y1_pred)))
     loss_0 = torch.mean(torch.square((y_c - y0_pred)))
-    loss_y = (loss_0 +  loss_1)
+    loss_y = (loss_0 + loss_1)
 
     loss = loss_y + alpha * loss_t
     

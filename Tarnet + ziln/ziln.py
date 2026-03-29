@@ -40,10 +40,13 @@ def zero_inflated_lognormal_loss(labels, logits):
     positive = (labels > 0).float()
 
     positive_logits = logits[..., :1]
-    pos_weight = torch.tensor([99.0], device=logits.device)
+    
+    #Classification 
+    # pos_weight = torch.tensor([99.0], device=logits.device)
     classification_loss = F.binary_cross_entropy_with_logits(
-        positive_logits, positive, reduction='mean', pos_weight = pos_weight)
+        positive_logits, positive, reduction='mean')
 
+    #Regression
     loc = logits[..., 1:2]
     scale = torch.max(
         F.softplus(logits[..., 2:]),

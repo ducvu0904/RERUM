@@ -1,9 +1,20 @@
 ﻿from model import TarnetBase, EarlyStopper, outcome_loss, QiniEarlyStopper
 from ziln import zero_inflated_lognormal_pred, compute_classification_metrics
+try:
+    from model import TarnetBase, EarlyStopper, outcome_loss, QiniEarlyStopper
+except ModuleNotFoundError:
+    from Tarnet.model import TarnetBase, EarlyStopper, outcome_loss, QiniEarlyStopper
+import sys
+from pathlib import Path
+project_root = Path("/home/ducvu0904/Documents/Lab/RERUM")
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 from metrics import auqc
 import torch 
 import numpy as np
 import copy
+
+
 
 class Tarnet:
     def __init__(
@@ -11,13 +22,13 @@ class Tarnet:
         input_dim,
         shared_hidden=200, 
         outcome_hidden=100, 
-        epochs=25,
+        epochs=150,
         learning_rate= 1e-3,
-        weight_decay = 1e-4,
+        weight_decay = 1e-5,
         early_stop_metric='qini',
         use_ema=True,
         ema_alpha=0.15,
-        patience=10,
+        patience=15,
         early_stop_start_epoch=0,
         outcome_dropout = 0,
         shared_dropout = 0,
@@ -375,7 +386,10 @@ class Tarnet:
         
     def predict(self, x):
         self.model.eval()
-        x = torch.tensor(x, dtype=torch.float32, device=self.device)
+        if isinstance(x, torch.Tensor):
+            x = x.to(device=self.device, dtype=torch.float32)
+        else:
+            x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             y0_pred, y1_pred = self.model(x)
             y0_pred = zero_inflated_lognormal_pred(y0_pred)
