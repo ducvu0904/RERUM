@@ -52,12 +52,12 @@ class TarnetBase(nn.Module):
 
     def _init_weights(self, positive_rate=0.01):
         positive_rate = np.clip(positive_rate, 1e-4, 1 - 1e-4)
-        p_bias = 0.8375
+        sigma_bias = 0.8375
         
         with torch.no_grad():
-            self.y0_p.bias.fill_(p_bias)
-            self.y1_p.bias.fill_(p_bias)
-            
+            self.y0_sigma.bias.fill_(sigma_bias)
+            self.y1_sigma.bias.fill_(sigma_bias)
+
             # 2. BẮT BUỘC: Init Bias cho Regression (Mu)
             self.y0_mu.bias.fill_(4.3952)
             self.y1_mu.bias.fill_(4.3952)

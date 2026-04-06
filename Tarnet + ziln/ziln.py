@@ -67,8 +67,8 @@ def zero_inflated_lognormal_loss(labels, logits, ziln_lambda=1.0, pos_weight=1.0
     safe_labels = positive * labels + (1 - positive) * torch.ones_like(labels)
     log_prob = tdist.LogNormal(loc=loc, scale=scale).log_prob(safe_labels)
     batch_size = labels.shape[0]
-    # regression_loss = -(positive * log_prob).sum() / batch_size
-    regression_loss = -(positive * log_prob).sum() / safe_denominator
+    regression_loss = -(positive * log_prob).sum() / batch_size
+    # regression_loss = -(positive * log_prob).sum() / safe_denominator
 
     mu_mean = loc.mean().item()
     sigma_mean = scale.mean().item()
