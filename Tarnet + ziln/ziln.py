@@ -20,47 +20,60 @@ def zero_inflated_lognormal_pred(logits):
     p = torch.sigmoid(logits[..., :1])
     mu = logits[..., 1:2]
     scale = torch.nn.functional.softplus(logits[..., 2:])
-    scale = torch.clamp(scale, min = 1e-4, max = 5.0)
+    scale = torch.clamp(scale, min = 1e-4, max = 1.05)
     log_mean = mu + 0.5 * scale**2
     expected_given_positive = torch.exp(log_mean)
 
     return p * expected_given_positive  
 
 
-def zero_inflated_lognormal_loss(labels, logits):
+def zero_inflated_lognormal_loss(labels, logits, ziln_lambda=1.0, pos_weight=1.0):
     """Computes the zero inflated lognormal loss.
 
     Arguments:
         labels: True targets, tensor of shape [batch_size, 1].
         logits: Logits of output layer, tensor of shape [batch_size, 3].
+        ziln_lambda: Weight for the regression loss component.
 
     Returns:
         Zero inflated lognormal loss value.
     """
     positive = (labels > 0).float()
+    num_positive = positive.sum() + 1e-8
 
     positive_logits = logits[..., :1]
     
+    safe_denominator = torch.clamp(num_positive, min=32.0)
+
+    # BCEWithLogits expects pos_weight to be a tensor.
+    if not isinstance(pos_weight, torch.Tensor):
+        pos_weight = torch.as_tensor(pos_weight, dtype=logits.dtype, device=logits.device)
+    else:
+        pos_weight = pos_weight.to(device=logits.device, dtype=logits.dtype)
+
+    if pos_weight.ndim == 0:
+        pos_weight = pos_weight.unsqueeze(0)
+    
     #Classification 
-    # pos_weight = torch.tensor([99.0], device=logits.device)
     classification_loss = F.binary_cross_entropy_with_logits(
-        positive_logits, positive, reduction='mean')
+        positive_logits, positive, reduction='mean', pos_weight=pos_weight)
 
     #Regression
     loc = logits[..., 1:2]
     scale = torch.max(
         F.softplus(logits[..., 2:]),
         torch.sqrt(torch.tensor(torch.finfo(torch.float32).eps, device=logits.device)))
-    scale = torch.clamp(scale, min = 1e-4, max = 5.0)
+    scale = torch.clamp(scale, min = 1e-4, max = 1.05)  
     safe_labels = positive * labels + (1 - positive) * torch.ones_like(labels)
     log_prob = tdist.LogNormal(loc=loc, scale=scale).log_prob(safe_labels)
     batch_size = labels.shape[0]
-    regression_loss = -(positive * log_prob).sum() / batch_size
+    # regression_loss = -(positive * log_prob).sum() / batch_size
+    regression_loss = -(positive * log_prob).sum() / safe_denominator
 
     mu_mean = loc.mean().item()
     sigma_mean = scale.mean().item()
 
-    return classification_loss + regression_loss, classification_loss.item(), regression_loss.item(), mu_mean, sigma_mean
+    return classification_loss + ziln_lambda *regression_loss, classification_loss.item(), regression_loss.item(), mu_mean, sigma_mean
 
 
 def compute_classification_metrics(labels, logits):

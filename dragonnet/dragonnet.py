@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+project_root = Path("/home/ducvu0904/Documents/Lab/RERUM")
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 from model import DragonNetBase, EarlyStopper, dragonnet_loss, QiniEarlyStopper, tarreg_loss
 from metrics import auqc
 import torch 
@@ -15,15 +20,15 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
         weight_decay = 1e-4,
-        early_stop_metric='loss',
+        early_stop_metric='qini',
         use_ema=False,
         ema_alpha=0.15,
         patience=10,
         early_stop_start_epoch=0,
         shared_dropout = 0,
-        outcome_droupout = 0
+        outcome_dropout = 0
     ):
-        self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_droupout)
+        self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_dropout)
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -316,10 +321,14 @@ class Dragonnet:
         
     def predict(self, x):
         self.model.eval()
-        x = torch.tensor(x, dtype=torch.float32, device=self.device)
+        if not isinstance(x, torch.Tensor):
+            x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
+        else:
+            # Avoid re-wrapping tensor inputs; just move/cast when needed.
+            x = x.to(device=self.device, dtype=torch.float32)
         with torch.no_grad():
-            y0_pred, y1_pred, t_pred, eps = self.model(x)
-        return y0_pred, y1_pred, t_pred, eps
+            y0_pred, y1_pred,_,_ = self.model(x)
+        return y0_pred, y1_pred
             
 # Xem uplift của một cá nhân bất kỳ
 def get_individual_uplift(model, x_test_tensor, index):

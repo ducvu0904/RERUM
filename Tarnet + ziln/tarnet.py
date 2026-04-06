@@ -32,7 +32,9 @@ class Tarnet:
         early_stop_start_epoch=0,
         outcome_dropout = 0,
         shared_dropout = 0,
-        positive_rate = 0.5,   # empirical P(y>0) in train set; used to init p-head bias
+        positive_rate = 0.01,
+        ziln_lambda=1.0,
+        pos_weight=1.0
     ):
         self.model = TarnetBase(input_dim, shared_hidden=shared_hidden, outcome_hidden=outcome_hidden,
                                 outcome_dropout=outcome_dropout, shared_dropout=shared_dropout,
@@ -42,6 +44,8 @@ class Tarnet:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.early_stop_metric = early_stop_metric
+        self.ziln_lambda = ziln_lambda
+        self.pos_weight = pos_weight
 
         # EMA parameters
         self.use_ema = use_ema
@@ -100,7 +104,7 @@ class Tarnet:
                 y0_pred_c = y0_pred[c_mask]
                 y1_pred_t = y1_pred[t_mask]
 
-                loss, cls_loss, reg_loss, mu_mean_t, sigma_mean_t, mu_mean_c, sigma_mean_c = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c)
+                loss, cls_loss, reg_loss, mu_mean_t, sigma_mean_t, mu_mean_c, sigma_mean_c = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c, ziln_lambda=self.ziln_lambda, pos_weight=self.pos_weight)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optim.step()
@@ -290,7 +294,7 @@ class Tarnet:
                 y0_pred_c = y0[c_mask]
                 y1_pred_t = y1[t_mask]
 
-                val_loss_batch, _, _, _, _, _, _ = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c)
+                val_loss_batch, _, _, _, _, _, _ = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c, ziln_lambda=1.0)
                 val_loss += val_loss_batch.item()
         return val_loss / len(val_loader)
     

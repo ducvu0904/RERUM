@@ -50,15 +50,17 @@ class TarnetBase(nn.Module):
 
         self._init_weights(positive_rate=positive_rate)
 
-    def _init_weights(self, positive_rate=0.05):
-        # Init p bias to match the empirical positive rate so the classification
-        # head starts from a calibrated prior instead of 1% (which was too conservative
-        # and slowed convergence of the p head significantly).
+    def _init_weights(self, positive_rate=0.01):
         positive_rate = np.clip(positive_rate, 1e-4, 1 - 1e-4)
-        p_bias = float(np.log(positive_rate / (1 - positive_rate)))
+        p_bias = 0.8375
+        
         with torch.no_grad():
             self.y0_p.bias.fill_(p_bias)
             self.y1_p.bias.fill_(p_bias)
+            
+            # 2. BẮT BUỘC: Init Bias cho Regression (Mu)
+            self.y0_mu.bias.fill_(4.3952)
+            self.y1_mu.bias.fill_(4.3952)
 
     def forward(self, inputs):
         """
@@ -94,14 +96,11 @@ class TarnetBase(nn.Module):
 
         return y0, y1
 
-def outcome_loss(y_t, y_c, y0_pred, y1_pred):
+def outcome_loss(y_t, y_c, y0_pred, y1_pred, ziln_lambda=1.0, pos_weight=1.0):
 
-    loss_0, cls_loss_0, reg_loss_0, mu_mean_t, sigma_mean_t = zero_inflated_lognormal_loss(y_t, y1_pred)
-    loss_1, cls_loss_1, reg_loss_1, mu_mean_c, sigma_mean_c = zero_inflated_lognormal_loss(y_c, y0_pred)
+    loss_0, cls_loss_0, reg_loss_0, mu_mean_t, sigma_mean_t = zero_inflated_lognormal_loss(y_t, y1_pred, ziln_lambda=ziln_lambda, pos_weight=pos_weight)
+    loss_1, cls_loss_1, reg_loss_1, mu_mean_c, sigma_mean_c = zero_inflated_lognormal_loss(y_c, y0_pred, ziln_lambda=ziln_lambda, pos_weight=pos_weight)
 
-    # Ensure losses are valid (no NaN or inf)
-    # Raise an error in debug mode; silently replacing NaN hides root causes.
-    # If NaN persists despite sigma clamp, the issue is upstream (e.g. exploding mu).
     if torch.isnan(loss_0) or torch.isinf(loss_0):
         loss_0 = loss_0.new_tensor(0.0)
     if torch.isnan(loss_1) or torch.isinf(loss_1):
