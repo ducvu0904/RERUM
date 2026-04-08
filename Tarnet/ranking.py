@@ -231,7 +231,7 @@ def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred):
     uplift_pred = uplift_pred.reshape(-1)
       
     # Compute log_softmax separately for each group
-    log_softmax_uplift_pred = F.log_softmax(uplift_pred, dim=0)
+    log_softmax_uplift_pred = F.log_softmax(uplift_pred/100, dim=0)
     softmax_uplift_pred_t = log_softmax_uplift_pred[t_true == 1]
     softmax_uplift_pred_c = log_softmax_uplift_pred[t_true == 0]
     

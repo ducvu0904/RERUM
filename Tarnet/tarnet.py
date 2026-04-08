@@ -16,7 +16,8 @@ from ranking import uplift_ranking_loss, response_ranking_loss
 class Tarnet:
     def __init__(
         self, 
-        input_dim,
+        cate_dims,
+        num_count,
         shared_hidden=200, 
         outcome_hidden=100, 
         epochs=30,
@@ -34,7 +35,17 @@ class Tarnet:
         response_ranking = 0.0,
         max_samples = 200
     ):
-        self.model = TarnetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_dropout)
+        # Optuna/manual configs sometimes pass numeric hyperparameters as float (e.g. 451.0).
+        # Linear layer dimensions and epoch counters must be integers.
+        shared_hidden = int(shared_hidden)
+        outcome_hidden = int(outcome_hidden)
+        epochs = int(epochs)
+        patience = int(patience)
+        early_stop_start_epoch = int(early_stop_start_epoch)
+        ranking_start_epoch = int(ranking_start_epoch)
+        max_samples = int(max_samples)
+
+        self.model = TarnetBase(cate_dims, num_count, shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_dropout)
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optim, mode="min", factor = 0.5, patience = 10, min_lr = 1e-6)
@@ -68,6 +79,10 @@ class Tarnet:
         print ("🔃🔃🔃Begin training Tarnet🔃🔃🔃")
         print (f"📊 Early Stop Metric: {self.early_stop_metric.upper()}")
         print (f"📊 Early Stop Start Epoch: {self.early_stop_start_epoch + 1}")
+        selection_start_epoch = max(0, self.ranking_start_epoch)
+        patience_start_epoch = max(self.early_stop_start_epoch, selection_start_epoch)
+        if selection_start_epoch > 0:
+            print (f"📊 Score Selection Start Epoch: {selection_start_epoch + 1} (ignore earlier epochs)")
         
         if self.early_stop_metric == 'ema_qini':
             print (f"📊 Strategy: Best EMA Qini (alpha={self.ema_alpha})")
@@ -82,8 +97,9 @@ class Tarnet:
         for epoch in range(self.epoch):
             self.model.train()
             epoch_loss=0
-            for x_batch , t_batch ,y_batch in train_loader:
-                    x_batch = x_batch.to(self.device)
+            for x_cate, x_num, t_batch, y_batch in train_loader:
+                    x_cate = x_cate.to(self.device)
+                    x_num = x_num.to(self.device)
                     
                     t_batch =t_batch.to(self.device) 
                     y_batch = y_batch.to(self.device)
@@ -93,7 +109,7 @@ class Tarnet:
                     self.optim.zero_grad()
                     
                     #FORWARD PASS
-                    y0_pred, y1_pred = self.model(x_batch)
+                    y0_pred, y1_pred = self.model(x_cate, x_num)
                     
                     y_t = y_batch[t_mask]
                     y_c = y_batch[c_mask]
@@ -146,28 +162,33 @@ class Tarnet:
             
             # EMA QINI EARLY STOP
             if self.early_stop_metric == 'ema_qini':
-                # Update EMA
-                if self.ema_qini is None:
-                    self.ema_qini = val_qini
+                if epoch >= selection_start_epoch:
+                    # Update EMA only from selection_start_epoch onward so pre-ranking epochs are fully ignored.
+                    if self.ema_qini is None:
+                        self.ema_qini = val_qini
+                    else:
+                        self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
+                    
+                    # Track best EMA Qini (patience only after patience_start_epoch)
+                    if self.ema_qini > self.best_ema_qini:
+                        self.best_ema_qini = self.ema_qini
+                        self.best_ema_epoch = epoch
+                        self.best_ema_model_state = copy.deepcopy(self.model.state_dict())
+                        self.best_qini = val_qini  # Track raw qini at this epoch too
+                        self.patience_counter = 0
+                        best_marker = "⭐ NEW BEST EMA"
+                    else:
+                        if epoch >= patience_start_epoch:
+                            self.patience_counter += 1
+                        best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                 else:
-                    self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
-                
-                # Track best EMA Qini (always track, patience only after early_stop_start_epoch)
-                if self.ema_qini > self.best_ema_qini:
-                    self.best_ema_qini = self.ema_qini
-                    self.best_ema_epoch = epoch
-                    self.best_ema_model_state = copy.deepcopy(self.model.state_dict())
-                    self.best_qini = val_qini  # Track raw qini at this epoch too
-                    self.patience_counter = 0
-                    best_marker = "⭐ NEW BEST EMA"
-                else:
-                    if epoch >= self.early_stop_start_epoch:
-                        self.patience_counter += 1
-                    best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                    best_marker = "(ignored before ranking_start_epoch)"
                 
                 if (epoch+1) % 1 == 0:
                     uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
                     pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
+                    ema_display = f"{self.ema_qini:.4f}" if self.ema_qini is not None else "N/A"
+                    best_ema_display = f"{self.best_ema_qini:.4f}" if self.best_ema_model_state is not None else "N/A"
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
                         f"Base Loss: {base_loss.item():.4f} | "
@@ -176,28 +197,32 @@ class Tarnet:
                         f"Total Loss: {loss.item():.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
                         f"Val Qini: {val_qini:.4f} | "
-                        f"EMA Qini: {self.ema_qini:.4f} | "
-                        f"Best EMA: {self.best_ema_qini:.4f} {best_marker}"
+                        f"EMA Qini: {ema_display} | "
+                        f"Best EMA: {best_ema_display} {best_marker}"
                     )
                 
                 # Early stopping based on patience
-                if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
+                if epoch >= patience_start_epoch and self.patience_counter >= self.patience:
                     print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                     print(f"   No improvement in EMA Qini for {self.patience} epochs")
                     break
             
             # LOSS EARLY STOP
             elif self.early_stop_metric == 'loss':
-                if val_loss < self.best_loss:
-                    self.best_loss = val_loss
-                    self.best_qini = val_qini  # Track qini too for reporting
-                    self.best_epoch = epoch
-                    self.best_model_state = copy.deepcopy(self.model.state_dict())
-                    self.patience_counter = 0
-                    best_marker = "⭐ NEW BEST (lowest loss)"
+                if epoch >= selection_start_epoch:
+                    if val_loss < self.best_loss:
+                        self.best_loss = val_loss
+                        self.best_qini = val_qini  # Track qini too for reporting
+                        self.best_epoch = epoch
+                        self.best_model_state = copy.deepcopy(self.model.state_dict())
+                        self.patience_counter = 0
+                        best_marker = "⭐ NEW BEST (lowest loss)"
+                    else:
+                        if epoch >= patience_start_epoch:
+                            self.patience_counter += 1
+                        best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                 else:
-                    self.patience_counter += 1
-                    best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                    best_marker = "(ignored before ranking_start_epoch)"
                 
                 if (epoch+1) % 1 == 0:
                     uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
@@ -214,20 +239,23 @@ class Tarnet:
                     )
                 
                 # ONLY USE EARLYSTOP AFTER N EPOCHS
-                if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
+                if epoch >= patience_start_epoch and self.patience_counter >= self.patience:
                     print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                     print(f"   No improvement in validation loss for {self.patience} epochs")
                     break
               
             # QINI EARLYSTOP    
             elif self.early_stop_metric == 'qini':
-                if val_qini > self.best_qini:
-                    self.best_qini = val_qini
-                    self.best_epoch = epoch
-                    self.best_model_state = copy.deepcopy(self.model.state_dict())
-                    best_marker = "⭐ NEW BEST"
+                if epoch >= selection_start_epoch:
+                    if val_qini > self.best_qini:
+                        self.best_qini = val_qini
+                        self.best_epoch = epoch
+                        self.best_model_state = copy.deepcopy(self.model.state_dict())
+                        best_marker = "⭐ NEW BEST"
+                    else:
+                        best_marker = ""
                 else:
-                    best_marker = ""
+                    best_marker = "(ignored before ranking_start_epoch)"
 
                 if (epoch+1) % 1 == 0:
                     uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
@@ -266,12 +294,15 @@ class Tarnet:
         self.model.eval()
         val_loss=0
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x, t, y = x.to(self.device), t.to(self.device), y.to(self.device)
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                t = t.to(self.device)
+                y = y.to(self.device)
                 t_mask = (t.squeeze(1) == 1)
                 c_mask = (t.squeeze(1) == 0)
-                
-                y0, y1 = self.model(x)
+
+                y0, y1 = self.model(x_cate, x_num)
                 y_t = y[t_mask]
                 y_c = y[c_mask]
 
@@ -290,9 +321,10 @@ class Tarnet:
         uplift_list = []
         
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x = x.to(self.device)
-                y0_pred, y1_pred = self.model(x)
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                y0_pred, y1_pred = self.model(x_cate, x_num)
                 
                 uplift = y1_pred - y0_pred
                 
@@ -316,14 +348,12 @@ class Tarnet:
         
         return float(qini_score)
         
-    def predict(self, x):
+    def predict(self, x_cate, x_num):
         self.model.eval()
-        if isinstance(x, torch.Tensor):
-            x = x.to(device=self.device, dtype=torch.float32)
-        else:
-            x = torch.tensor(x, dtype=torch.float32, device=self.device)
+        x_cate = x_cate.to(device=self.device, dtype=torch.long)
+        x_num = x_num.to(device=self.device, dtype=torch.float32)
         with torch.no_grad():
-            y0_pred, y1_pred = self.model(x)
+            y0_pred, y1_pred = self.model(x_cate, x_num)
         return y0_pred, y1_pred
             
 # Xem uplift của một cá nhân bất kỳ
@@ -337,7 +367,7 @@ def get_individual_uplift(model, x_test_tensor, index):
     x_individual = x_individual.to(device)
 
     # Predict
-    y0_pred, y1_pred, t_pred, _ = model.predict(x_individual)
+    y0_pred, y1_pred = model.predict(x_individual)
 
     # Tính uplift
     uplift = (y1_pred - y0_pred).item()
@@ -346,8 +376,7 @@ def get_individual_uplift(model, x_test_tensor, index):
         "index": index,
         "y0_pred (control outcome)": y0_pred.item(),
         "y1_pred (treatment outcome)": y1_pred.item(),
-        "uplift": uplift,
-        "t_pred (propensity)": t_pred.item()
+        "uplift": uplift
     }
 
     return result         
