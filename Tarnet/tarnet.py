@@ -33,7 +33,7 @@ class Tarnet:
         outcome_dropout = 0,
         uplift_ranking = 0.0,
         response_ranking = 0.0,
-        max_samples = 200
+        max_samples = 1000
     ):
         # Optuna/manual configs sometimes pass numeric hyperparameters as float (e.g. 451.0).
         # Linear layer dimensions and epoch counters must be integers.
@@ -79,7 +79,9 @@ class Tarnet:
         print ("🔃🔃🔃Begin training Tarnet🔃🔃🔃")
         print (f"📊 Early Stop Metric: {self.early_stop_metric.upper()}")
         print (f"📊 Early Stop Start Epoch: {self.early_stop_start_epoch + 1}")
-        selection_start_epoch = max(0, self.ranking_start_epoch)
+        # Only start selecting/recording the best epoch once training is considered stable.
+        # This guarantees early random Qini spikes (e.g. first 20 epochs) are ignored.
+        selection_start_epoch = max(0, self.early_stop_start_epoch, self.ranking_start_epoch)
         patience_start_epoch = max(self.early_stop_start_epoch, selection_start_epoch)
         if selection_start_epoch > 0:
             print (f"📊 Score Selection Start Epoch: {selection_start_epoch + 1} (ignore earlier epochs)")
@@ -182,7 +184,7 @@ class Tarnet:
                             self.patience_counter += 1
                         best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                 else:
-                    best_marker = "(ignored before ranking_start_epoch)"
+                    best_marker = "(ignored before score selection start epoch)"
                 
                 if (epoch+1) % 1 == 0:
                     uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
@@ -222,7 +224,7 @@ class Tarnet:
                             self.patience_counter += 1
                         best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                 else:
-                    best_marker = "(ignored before ranking_start_epoch)"
+                    best_marker = "(ignored before score selection start epoch)"
                 
                 if (epoch+1) % 1 == 0:
                     uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
@@ -255,7 +257,7 @@ class Tarnet:
                     else:
                         best_marker = ""
                 else:
-                    best_marker = "(ignored before ranking_start_epoch)"
+                    best_marker = "(ignored before score selection start epoch)"
 
                 if (epoch+1) % 1 == 0:
                     uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""

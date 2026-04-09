@@ -20,8 +20,9 @@ def zero_inflated_lognormal_pred(logits):
     p = torch.sigmoid(logits[..., :1])
     mu = logits[..., 1:2]
     scale = torch.nn.functional.softplus(logits[..., 2:])
-    scale = torch.clamp(scale, min = 1e-4, max = 1.05)
-    log_mean = mu + 0.5 * scale**2
+    scale = torch.clamp(scale, min = 1e-4, max = 2)
+    # log_mean = mu + 0.5 * scale**2
+    log_mean = torch.clamp(mu, max=8.0) # exp(8) ~ 2980, đủ lớn cho chi tiêu
     expected_given_positive = torch.exp(log_mean)
 
     return p * expected_given_positive  
@@ -63,12 +64,12 @@ def zero_inflated_lognormal_loss(labels, logits, ziln_lambda=1.0, pos_weight=1.0
     scale = torch.max(
         F.softplus(logits[..., 2:]),
         torch.sqrt(torch.tensor(torch.finfo(torch.float32).eps, device=logits.device)))
-    scale = torch.clamp(scale, min = 1e-4, max = 1.05)  
+    scale = torch.clamp(scale, min = 1e-4, max = 2)  
     safe_labels = positive * labels + (1 - positive) * torch.ones_like(labels)
     log_prob = tdist.LogNormal(loc=loc, scale=scale).log_prob(safe_labels)
     batch_size = labels.shape[0]
-    regression_loss = -(positive * log_prob).sum() / batch_size
-    # regression_loss = -(positive * log_prob).sum() / safe_denominator
+    # regression_loss = -(positive * log_prob).sum() / batch_size
+    regression_loss = -(positive * log_prob).sum() / safe_denominator
 
     mu_mean = loc.mean().item()
     sigma_mean = scale.mean().item()

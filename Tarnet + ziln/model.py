@@ -17,10 +17,19 @@ class TarnetBase(nn.Module):
     outcome_hidden: int
         layer size for conditional outcome layers
     """
-    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, shared_dropout=0.0, outcome_dropout=0.0, positive_rate=0.05):
+    def __init__(self, cate_dims, num_count, shared_hidden=200, outcome_hidden=100, shared_dropout = 0.0,  outcome_dropout=0.0, positive_rate=0.01):
         super(TarnetBase, self).__init__()
+        
+        # Create list of embedding layers for categorical features
+        self.cat_embeds = nn.ModuleList([
+            nn.Embedding(dim, 10) for dim in cate_dims
+        ])
+        self.num_count = nn.ModuleList([
+            nn.Linear(1, 10) for _ in range(num_count)])
+        # Calculate the total input dimension for the shared layers
+        total_emb_dim  = (len(cate_dims) * 10) + (num_count * 10)
         self.shared = nn.Sequential(
-        nn.Linear(in_features=input_dim, out_features=shared_hidden),
+        nn.Linear(in_features=total_emb_dim, out_features=shared_hidden),
         nn.ReLU(),
         nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
@@ -51,10 +60,12 @@ class TarnetBase(nn.Module):
         self._init_weights(positive_rate=positive_rate)
 
     def _init_weights(self, positive_rate=0.01):
-        positive_rate = np.clip(positive_rate, 1e-4, 1 - 1e-4)
         sigma_bias = 0.8375
-        
+        p_bias = np.log(positive_rate / (1 - positive_rate))
         with torch.no_grad():
+            self.y0_p.bias.fill_(p_bias)
+            self.y1_p.bias.fill_(p_bias)
+            
             self.y0_sigma.bias.fill_(sigma_bias)
             self.y1_sigma.bias.fill_(sigma_bias)
 
@@ -62,13 +73,16 @@ class TarnetBase(nn.Module):
             self.y0_mu.bias.fill_(4.3952)
             self.y1_mu.bias.fill_(4.3952)
 
-    def forward(self, inputs):
+    def forward(self, x_cat, x_num):
         """
         forward method to train model.
 
         Parameters
         ----------
-        inputs: torch.Tensor
+        x_cat: torch.Tensor
+            Categorical covariates
+        x_num: torch.Tensor
+            Numerical covariates
             covariates
 
         Returns
@@ -78,7 +92,15 @@ class TarnetBase(nn.Module):
         y1: torch.Tensor
             [batch, 3] ZILN logits for treatment outcome (p, mu, sigma)
         """
-        z = self.shared(inputs)
+        embeddings = []
+        for i, emb_layer in enumerate(self.cat_embeds):
+            embeddings.append(emb_layer(x_cat[:, i].long()))  
+        for i, num_layer in enumerate(self.num_count):
+            embeddings.append(num_layer(x_num[:, i].unsqueeze(1))) 
+
+        z_input = torch.cat(embeddings, dim=1)           
+        #concatenate all embeddings and projections to create input for shared layers
+        z = self.shared(z_input)
 
         # --- CONTROL FLOW ---
         h0 = self.head_0_common(z)

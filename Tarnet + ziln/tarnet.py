@@ -19,7 +19,8 @@ import copy
 class Tarnet:
     def __init__(
         self, 
-        input_dim,
+        cate_dims,
+        num_count,
         shared_hidden=200, 
         outcome_hidden=100, 
         epochs=150,
@@ -36,7 +37,7 @@ class Tarnet:
         ziln_lambda=1.0,
         pos_weight=1.0
     ):
-        self.model = TarnetBase(input_dim, shared_hidden=shared_hidden, outcome_hidden=outcome_hidden,
+        self.model = TarnetBase(cate_dims, num_count, shared_hidden=shared_hidden, outcome_hidden=outcome_hidden,
                                 outcome_dropout=outcome_dropout, shared_dropout=shared_dropout,
                                 positive_rate=positive_rate)
         self.epoch = epochs
@@ -70,6 +71,9 @@ class Tarnet:
         print ("🔃🔃🔃Begin training Tarnet🔃🔃🔃")
         print (f"📊 Early Stop Metric: {self.early_stop_metric.upper()}")
         print (f"📊 Early Stop Start Epoch: {self.early_stop_start_epoch + 1}")
+        selection_start_epoch = max(0, self.early_stop_start_epoch)
+        if selection_start_epoch > 0:
+            print (f"📊 Score Selection Start Epoch: {selection_start_epoch + 1} (ignore earlier epochs)")
         
         if self.early_stop_metric == 'ema_qini':
             print (f"📊 Strategy: Best EMA Qini (alpha={self.ema_alpha})")
@@ -88,8 +92,9 @@ class Tarnet:
         for epoch in range(self.epoch):
             self.model.train()
             epoch_loss = 0
-            for x_batch, t_batch, y_batch in train_loader:
-                x_batch = x_batch.to(self.device)
+            for x_cate, x_num, t_batch, y_batch in train_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
                 t_batch = t_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
                 
@@ -97,7 +102,7 @@ class Tarnet:
                 c_mask = (t_batch.squeeze(1) == 0)
                 self.optim.zero_grad()
                 
-                y0_pred, y1_pred = self.model(x_batch)
+                y0_pred, y1_pred = self.model(x_cate, x_num)
                 
                 y_t = y_batch[t_mask]
                 y_c = y_batch[c_mask]
@@ -126,24 +131,28 @@ class Tarnet:
             
             # EMA QINI EARLY STOP
             if self.early_stop_metric == 'ema_qini':
-                # Update EMA
-                if self.ema_qini is None:
-                    self.ema_qini = val_qini
-                else:
-                    self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
-                
-                # Track best EMA Qini (always track, patience only after early_stop_start_epoch)
-                if self.ema_qini > self.best_ema_qini:
-                    self.best_ema_qini = self.ema_qini
-                    self.best_ema_epoch = epoch
-                    self.best_ema_model_state = copy.deepcopy(self.model.state_dict())
-                    self.best_qini = val_qini
-                    self.patience_counter = 0
-                    best_marker = "⭐ NEW BEST EMA"
-                else:
-                    if epoch >= self.early_stop_start_epoch:
+                if epoch >= selection_start_epoch:
+                    # Start EMA and best-checkpoint tracking only after selection_start_epoch.
+                    if self.ema_qini is None:
+                        self.ema_qini = val_qini
+                    else:
+                        self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
+
+                    if self.ema_qini > self.best_ema_qini:
+                        self.best_ema_qini = self.ema_qini
+                        self.best_ema_epoch = epoch
+                        self.best_ema_model_state = copy.deepcopy(self.model.state_dict())
+                        self.best_qini = val_qini
+                        self.patience_counter = 0
+                        best_marker = "⭐ NEW BEST EMA"
+                    else:
                         self.patience_counter += 1
-                    best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                        best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                else:
+                    best_marker = "(ignored before score selection start epoch)"
+
+                ema_display = f"{self.ema_qini:.4f}" if self.ema_qini is not None else "N/A"
+                best_ema_display = f"{self.best_ema_qini:.4f}" if self.best_ema_model_state is not None else "N/A"
                 
                 print(
                     f"Epoch {epoch+1}/{self.epoch} | "
@@ -154,27 +163,30 @@ class Tarnet:
                     f"Val Loss: {val_loss:.4f} | "
                     f"{cls_str} | "
                     f"Val Qini: {val_qini:.4f} | "
-                    f"EMA Qini: {self.ema_qini:.4f} | "
-                    f"Best EMA: {self.best_ema_qini:.4f} {best_marker}"
+                    f"EMA Qini: {ema_display} | "
+                    f"Best EMA: {best_ema_display} {best_marker}"
                 )
                 
-                if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
+                if epoch >= selection_start_epoch and self.patience_counter >= self.patience:
                     print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                     print(f"   No improvement in EMA Qini for {self.patience} epochs")
                     break
             
             # LOSS EARLY STOP
             elif self.early_stop_metric == 'loss':
-                if val_loss < self.best_loss:
-                    self.best_loss = val_loss
-                    self.best_qini = val_qini
-                    self.best_epoch = epoch
-                    self.best_model_state = copy.deepcopy(self.model.state_dict())
-                    self.patience_counter = 0
-                    best_marker = "⭐ NEW BEST (lowest loss)"
+                if epoch >= selection_start_epoch:
+                    if val_loss < self.best_loss:
+                        self.best_loss = val_loss
+                        self.best_qini = val_qini
+                        self.best_epoch = epoch
+                        self.best_model_state = copy.deepcopy(self.model.state_dict())
+                        self.patience_counter = 0
+                        best_marker = "⭐ NEW BEST (lowest loss)"
+                    else:
+                        self.patience_counter += 1
+                        best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                 else:
-                    self.patience_counter += 1
-                    best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                    best_marker = "(ignored before score selection start epoch)"
                 
                 print(
                     f"Epoch {epoch+1}/{self.epoch} | "
@@ -187,36 +199,41 @@ class Tarnet:
                     f"Val Qini: {val_qini:.4f} {best_marker}"
                 )
                 
-                if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
+                if epoch >= selection_start_epoch and self.patience_counter >= self.patience:
                     print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                     print(f"   No improvement in validation loss for {self.patience} epochs")
                     break
                     
             elif self.early_stop_metric == 'qini':
                 if self.use_ema:
-                    if self.ema_qini is None:
-                        self.ema_qini = val_qini
+                    if epoch >= selection_start_epoch:
+                        if self.ema_qini is None:
+                            self.ema_qini = val_qini
+                        else:
+                            self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
+
+                        is_above_trend = val_qini >= self.ema_qini
+                        is_new_peak = val_qini > self.best_qini
+
+                        if is_new_peak and is_above_trend:
+                            self.best_qini = val_qini
+                            self.best_epoch = epoch
+                            self.best_model_state = copy.deepcopy(self.model.state_dict())
+                            self.patience_counter = 0
+                            best_marker = "⭐ NEW BEST (peak ≥ trend)"
+                        elif is_new_peak and not is_above_trend:
+                            self.patience_counter += 1
+                            best_marker = f"❌ peak below trend (patience: {self.patience_counter}/{self.patience})"
+                        elif not is_new_peak and is_above_trend:
+                            self.patience_counter += 1
+                            best_marker = f"✓ above trend but not peak (patience: {self.patience_counter}/{self.patience})"
+                        else:
+                            self.patience_counter += 1
+                            best_marker = f"(patience: {self.patience_counter}/{self.patience})"
                     else:
-                        self.ema_qini = self.ema_alpha * val_qini + (1 - self.ema_alpha) * self.ema_qini
-                    
-                    is_above_trend = val_qini >= self.ema_qini
-                    is_new_peak = val_qini > self.best_qini
-                    
-                    if is_new_peak and is_above_trend:
-                        self.best_qini = val_qini
-                        self.best_epoch = epoch
-                        self.best_model_state = copy.deepcopy(self.model.state_dict())
-                        self.patience_counter = 0
-                        best_marker = "⭐ NEW BEST (peak ≥ trend)"
-                    elif is_new_peak and not is_above_trend:
-                        self.patience_counter += 1
-                        best_marker = f"❌ peak below trend (patience: {self.patience_counter}/{self.patience})"
-                    elif not is_new_peak and is_above_trend:
-                        self.patience_counter += 1
-                        best_marker = f"✓ above trend but not peak (patience: {self.patience_counter}/{self.patience})"
-                    else:
-                        self.patience_counter += 1
-                        best_marker = f"(patience: {self.patience_counter}/{self.patience})"
+                        best_marker = "(ignored before score selection start epoch)"
+
+                    ema_trend_display = f"{self.ema_qini:.4f}" if self.ema_qini is not None else "N/A"
                     
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
@@ -227,22 +244,25 @@ class Tarnet:
                         f"Val Loss: {val_loss:.4f} | "
                         f"{cls_str} | "
                         f"Raw Qini: {val_qini:.4f} | "
-                        f"EMA Trend: {self.ema_qini:.4f} | "
+                        f"EMA Trend: {ema_trend_display} | "
                         f"{best_marker}"
                     )
                     
-                    if epoch >= self.early_stop_start_epoch and self.patience_counter >= self.patience:
+                    if epoch >= selection_start_epoch and self.patience_counter >= self.patience:
                         print(f"\n🛑 Early stopping triggered at epoch {epoch+1}!")
                         print(f"   No valid peak (raw ≥ trend) found in last {self.patience} epochs")
                         break
                 else:
-                    if val_qini > self.best_qini:
-                        self.best_qini = val_qini
-                        self.best_epoch = epoch
-                        self.best_model_state = copy.deepcopy(self.model.state_dict())
-                        best_marker = "⭐ NEW BEST"
+                    if epoch >= selection_start_epoch:
+                        if val_qini > self.best_qini:
+                            self.best_qini = val_qini
+                            self.best_epoch = epoch
+                            self.best_model_state = copy.deepcopy(self.model.state_dict())
+                            best_marker = "⭐ NEW BEST"
+                        else:
+                            best_marker = ""
                     else:
-                        best_marker = ""
+                        best_marker = "(ignored before score selection start epoch)"
                         
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
@@ -283,12 +303,15 @@ class Tarnet:
         self.model.eval()
         val_loss = 0
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x, t, y = x.to(self.device), t.to(self.device), y.to(self.device)
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                t = t.to(self.device)
+                y = y.to(self.device)
                 t_mask = (t.squeeze(1) == 1)
                 c_mask = (t.squeeze(1) == 0)
-                
-                y0, y1 = self.model(x)
+
+                y0, y1 = self.model(x_cate, x_num)
                 y_t = y[t_mask]
                 y_c = y[c_mask]
                 y0_pred_c = y0[c_mask]
@@ -306,10 +329,11 @@ class Tarnet:
         uplift_list = []
         
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x = x.to(self.device)
-                y0_pred, y1_pred = self.model(x)
-                
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                y0_pred, y1_pred = self.model(x_cate, x_num)
+
                 # Convert ZILN predictions to expected values
                 y0_pred = zero_inflated_lognormal_pred(y0_pred)
                 y1_pred = zero_inflated_lognormal_pred(y1_pred)
@@ -345,12 +369,15 @@ class Tarnet:
         y_t_list = []  # labels for treatment group
         
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x = x.to(self.device)
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                t = t.to(self.device)
+                y = y.to(self.device)
                 t_mask = (t.squeeze(1) == 1)
                 c_mask = (t.squeeze(1) == 0)
                 
-                y0_logits, y1_logits = self.model(x)
+                y0_logits, y1_logits = self.model(x_cate, x_num)
                 
                 # Collect control group: y0 logits with control labels
                 if c_mask.sum() > 0:
@@ -388,14 +415,20 @@ class Tarnet:
         
         return results
         
-    def predict(self, x):
+    def predict(self, x_cate, x_num):
         self.model.eval()
-        if isinstance(x, torch.Tensor):
-            x = x.to(device=self.device, dtype=torch.float32)
+        if isinstance(x_cate, torch.Tensor):
+            x_cate = x_cate.to(device=self.device, dtype=torch.float32)
         else:
-            x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
+            x_cate = torch.as_tensor(x_cate, dtype=torch.float32, device=self.device)
+        
+        if isinstance(x_num, torch.Tensor):
+            x_num = x_num.to(device=self.device, dtype=torch.float32)
+        else:
+            x_num = torch.as_tensor(x_num, dtype=torch.float32, device=self.device)
+        
         with torch.no_grad():
-            y0_pred, y1_pred = self.model(x)
+            y0_pred, y1_pred = self.model(x_cate, x_num)
             y0_pred = zero_inflated_lognormal_pred(y0_pred)
             y1_pred = zero_inflated_lognormal_pred(y1_pred)
         return y0_pred, y1_pred
@@ -406,9 +439,10 @@ class Tarnet:
         y0_list = []
         y1_list = []
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x = x.to(self.device)
-                y0_pred, y1_pred = self.model(x)
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                y0_pred, y1_pred = self.model(x_cate, x_num)
                 y0_pred = zero_inflated_lognormal_pred(y0_pred)
                 y1_pred = zero_inflated_lognormal_pred(y1_pred)
                 y0_list.append(y0_pred.cpu().numpy())

@@ -23,14 +23,14 @@ class TarnetBase(nn.Module):
         self.cat_embeds = nn.ModuleList([
             nn.Embedding(dim, 10) for dim in cate_dims
         ])
-        
-        #Create list of linear layers for numerical features
+                
         self.num_projections = nn.ModuleList([
             nn.Linear(1, 10) for _ in range(num_count)
         ])
         
-        # Calculate the total input dimension for the shared layers
-        total_emb_dim  = (len(cate_dims) * 10) + (num_count * 10)
+        # Tính toán input_dim mới cho lớp Shared đầu tiên
+        # Mỗi đặc trưng (cả cat và num) đều đóng góp 10 chiều
+        total_emb_dim = (len(cate_dims) + num_count) * 10
         
         
         self.shared = nn.Sequential(
@@ -83,17 +83,15 @@ class TarnetBase(nn.Module):
         y1: torch.Tensor
             outcome under treatment
         """
-        #search for embedding layers and projection layers to process categorical and numerical features
+        # Process categorical embeddings and projected numerical features.
         embeddings = []
         for i, emb_layer in enumerate(self.cat_embeds):
-            embeddings.append(emb_layer(x_cat[:, i].long()))   
-             
-        #project numerical features to the same dimension as embeddings
+            embeddings.append(emb_layer(x_cat[:, i].long()))
         for i, proj_layer in enumerate(self.num_projections):
-            embeddings.append(proj_layer(x_num[:, i].float().unsqueeze(1)))  
-              
-        #concatenate all embeddings and projections to create input for shared layers
-        z_input = torch.cat(embeddings, dim=1)    
+            embeddings.append(proj_layer(x_num[:, i].unsqueeze(1)))
+
+        # [batch, (n_cat + n_num) * 10]
+        z_input = torch.cat(embeddings, dim=1)
         z = self.shared(z_input)
         y0 = self.y0(z)
         y1 = self.y1(z)

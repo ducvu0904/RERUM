@@ -13,7 +13,7 @@ def pairwise_ranking_loss_with_count(pred_row, true_row, pred_col, true_col, max
         true_col: ground truth cho col samples
         
     Returns:
-        (loss, total_possible_pairs): loss được SUM (chưa normalize), và tổng số pairs có thể
+        loss/misranked_pairs cho các cặp bị misrank
     """
     pred_row = pred_row.view(-1)
     true_row = true_row.view(-1)
@@ -44,15 +44,17 @@ def pairwise_ranking_loss_with_count(pred_row, true_row, pred_col, true_col, max
     product = pred_diff * true_diff
     mask = (product < 0)
     
-    # Tổng số pairs có thể so sánh (N * M)
-    total_possible_pairs = N * M
+    misranked_pairs = mask.sum().item()
     
     if mask.any():
         loss = ((pred_diff - true_diff) ** 2)[mask].sum()
     else:
         loss = torch.tensor(0.0, device=pred_row.device)
-            
-    return loss, total_possible_pairs
+
+    if misranked_pairs > 0:
+        return loss / misranked_pairs
+
+    return torch.tensor(0.0, device=pred_row.device)
 
 
 def cross_group_ranking_loss_with_count(pred_i, true_i, pred_j, true_j, max_samples=200):
@@ -72,7 +74,7 @@ def cross_group_ranking_loss_with_count(pred_i, true_i, pred_j, true_j, max_samp
         true_j: ground truth của group j
         
     Returns:
-        (loss, total_possible_pairs): loss được SUM (chưa normalize), và tổng số pairs có thể
+        loss/misranked_pairs cho các cặp bị misrank
     """
     pred_i = pred_i.view(-1)
     true_i = true_i.view(-1)
@@ -103,15 +105,17 @@ def cross_group_ranking_loss_with_count(pred_i, true_i, pred_j, true_j, max_samp
     product = diff_1 * diff_2
     mask = (product < 0)
     
-    # Tổng số pairs có thể so sánh (N * M)
-    total_possible_pairs = N * M
+    misranked_pairs = mask.sum().item()
     
     if mask.any():
         loss = ((diff_1 - diff_2) ** 2)[mask].sum()
     else:
         loss = torch.tensor(0.0, device=pred_i.device)
-        
-    return loss, total_possible_pairs
+
+    if misranked_pairs > 0:
+        return loss / misranked_pairs
+
+    return torch.tensor(0.0, device=pred_i.device)
 
 
 def response_ranking_loss(y_true, t_true, y0_pred, y1_pred, max_samples=200):
@@ -149,19 +153,19 @@ def response_ranking_loss(y_true, t_true, y0_pred, y1_pred, max_samples=200):
     
     
     # ========== INTRA-GROUP LOSS ==========
-    treat_loss, treat_pairs = torch.tensor(0.0, device=y_true.device), 0
+    treat_loss = torch.tensor(0.0, device=y_true.device)
     if N1 > 1:
         # Treatment group:  compare y1_pred (factual) with y_true
-        treat_loss, treat_pairs = pairwise_ranking_loss_with_count(
+        treat_loss = pairwise_ranking_loss_with_count(
             y1_pred_t, y_t,
             y1_pred_t, y_t,
             max_samples=max_samples
         )
         
-    control_loss, control_pairs = torch.tensor(0.0, device=y_true.device), 0
+    control_loss = torch.tensor(0.0, device=y_true.device)
     if N0 > 1:
         # Control group: compare y0_pred (factual) with y_true
-        control_loss, control_pairs = pairwise_ranking_loss_with_count(
+        control_loss = pairwise_ranking_loss_with_count(
             y0_pred_c, y_c,
             y0_pred_c, y_c,
             max_samples=max_samples
@@ -169,14 +173,14 @@ def response_ranking_loss(y_true, t_true, y0_pred, y1_pred, max_samples=200):
     
     
     # ========== CROSS-GROUP LOSS (theo paper) ==========
-    cross_loss_tc, tc_pairs = torch.tensor(0.0, device=y_true.device), 0
-    cross_loss_ct, ct_pairs = torch.tensor(0.0, device=y_true.device), 0
+    cross_loss_tc = torch.tensor(0.0, device=y_true.device)
+    cross_loss_ct = torch.tensor(0.0, device=y_true.device)
     
     if N1 > 0 and N0 > 0:
         # Treatment[i] vs Control[j]: 
         # diff_1 = y1_pred_t[i] - y_c[j]  (ŷᵢ¹ - yⱼ⁰)
         # diff_2 = y_t[i] - y0_pred_c[j]  (yᵢ¹ - ŷⱼ⁰)
-        cross_loss_tc, tc_pairs = cross_group_ranking_loss_with_count(
+        cross_loss_tc = cross_group_ranking_loss_with_count(
             pred_i=y1_pred_t,  # Treatment prediction (factual)
             true_i=y_t,        # Treatment ground truth
             pred_j=y0_pred_c,  # Control prediction (factual)
@@ -187,7 +191,7 @@ def response_ranking_loss(y_true, t_true, y0_pred, y1_pred, max_samples=200):
         # Control[j] vs Treatment[i] (ngược lại):
         # diff_1 = y0_pred_c[j] - y_t[i]  (ŷⱼ⁰ - yᵢ¹)
         # diff_2 = y_c[j] - y1_pred_t[i]  (yⱼ⁰ - ŷᵢ¹)
-        cross_loss_ct, ct_pairs = cross_group_ranking_loss_with_count(
+        cross_loss_ct = cross_group_ranking_loss_with_count(
             pred_i=y0_pred_c,  # Control prediction (factual)
             true_i=y_c,        # Control ground truth
             pred_j=y1_pred_t,  # Treatment prediction (factual)
@@ -196,20 +200,10 @@ def response_ranking_loss(y_true, t_true, y0_pred, y1_pred, max_samples=200):
         )
     
     
-    # ========== NORMALIZATION ==========
-    # Tổng loss từ tất cả các components
+    # Tổng của các component đã được normalize theo misranked pairs
     total_loss = treat_loss + control_loss + cross_loss_tc + cross_loss_ct
-    
-    # Tổng số pairs có thể có (không chỉ pairs bị misrank)
-    total_pairs = treat_pairs + control_pairs + tc_pairs + ct_pairs
-    
-    if total_pairs > 0:
-        # Loss trung bình per pair (bao gồm cả pairs được rank đúng và sai)
-        normalized_loss = total_loss / total_pairs
-    else:
-        normalized_loss = torch.tensor(0.0, device=y_true.device, requires_grad=True)
 
-    return normalized_loss
+    return total_loss
 
 
 def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred):
@@ -231,7 +225,7 @@ def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred):
     uplift_pred = uplift_pred.reshape(-1)
       
     # Compute log_softmax separately for each group
-    log_softmax_uplift_pred = F.log_softmax(uplift_pred/100, dim=0)
+    log_softmax_uplift_pred = F.log_softmax(uplift_pred, dim=0)
     softmax_uplift_pred_t = log_softmax_uplift_pred[t_true == 1]
     softmax_uplift_pred_c = log_softmax_uplift_pred[t_true == 0]
     
