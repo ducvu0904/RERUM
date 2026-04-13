@@ -42,6 +42,13 @@ class Tarnet:
                                 positive_rate=positive_rate)
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optim,
+            mode="min",
+            factor=0.5,
+            patience=10,
+            min_lr=1e-6,
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.early_stop_metric = early_stop_metric
@@ -117,6 +124,8 @@ class Tarnet:
             
             val_qini = self.validate_qini(val_loader)
             val_loss = self.validate(val_loader)
+            self.scheduler.step(val_loss)
+            current_lr = self.optim.param_groups[0]['lr']
             cls_metrics = self.validate_classification_metrics(val_loader)
             
             # Format classification metrics string
@@ -164,7 +173,8 @@ class Tarnet:
                     f"{cls_str} | "
                     f"Val Qini: {val_qini:.4f} | "
                     f"EMA Qini: {ema_display} | "
-                    f"Best EMA: {best_ema_display} {best_marker}"
+                    f"Best EMA: {best_ema_display} {best_marker} | "
+                    f"LR: {current_lr:.6f}"
                 )
                 
                 if epoch >= selection_start_epoch and self.patience_counter >= self.patience:
@@ -196,7 +206,8 @@ class Tarnet:
                     f"mu_c: {mu_mean_c:.4f} | sigma_c: {sigma_mean_c:.4f} | "
                     f"Val Loss: {val_loss:.4f} | "
                     f"{cls_str} | "
-                    f"Val Qini: {val_qini:.4f} {best_marker}"
+                    f"Val Qini: {val_qini:.4f} {best_marker} | "
+                    f"LR: {current_lr:.6f}"
                 )
                 
                 if epoch >= selection_start_epoch and self.patience_counter >= self.patience:
@@ -245,7 +256,8 @@ class Tarnet:
                         f"{cls_str} | "
                         f"Raw Qini: {val_qini:.4f} | "
                         f"EMA Trend: {ema_trend_display} | "
-                        f"{best_marker}"
+                        f"{best_marker} | "
+                        f"LR: {current_lr:.6f}"
                     )
                     
                     if epoch >= selection_start_epoch and self.patience_counter >= self.patience:
@@ -272,7 +284,8 @@ class Tarnet:
                         f"mu_c: {mu_mean_c:.4f} | sigma_c: {sigma_mean_c:.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
                         f"{cls_str} | "
-                        f"Val Qini: {val_qini:.4f} {best_marker}"
+                        f"Val Qini: {val_qini:.4f} {best_marker} | "
+                        f"LR: {current_lr:.6f}"
                     )
         
         if self.early_stop_metric == 'ema_qini' and self.best_ema_model_state is not None:

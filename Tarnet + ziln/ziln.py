@@ -22,7 +22,8 @@ def zero_inflated_lognormal_pred(logits):
     scale = torch.nn.functional.softplus(logits[..., 2:])
     scale = torch.clamp(scale, min = 1e-4, max = 2)
     # log_mean = mu + 0.5 * scale**2
-    log_mean = torch.clamp(mu, max=8.0) # exp(8) ~ 2980, đủ lớn cho chi tiêu
+    safe_sigma2 = torch.clamp(scale**2, min=1e-8, max=0.5)
+    log_mean = torch.clamp(mu + 0.5 * safe_sigma2, min=1e-8, max=8.0)
     expected_given_positive = torch.exp(log_mean)
 
     return p * expected_given_positive  
