@@ -17,61 +17,38 @@ class TarnetBase(nn.Module):
     outcome_hidden: int
         layer size for conditional outcome layers
     """
-    def __init__(self, cate_dims, num_count, shared_hidden=200, outcome_hidden=100, shared_dropout = 0.0,  outcome_dropout=0.0, positive_rate=0.01):
+    def __init__(self, cate_dims, num_count, shared_hidden=200, outcome_hidden=100, shared_dropout = 0.0,  outcome_dropout=0.0):
         super(TarnetBase, self).__init__()
         
         # Create list of embedding layers for categorical features
         self.cat_embeds = nn.ModuleList([
             nn.Embedding(dim, 10) for dim in cate_dims
         ])
-        self.num_count = nn.ModuleList([
-            nn.Linear(1, 10) for _ in range(num_count)])
+        self.num_count = num_count
         # Calculate the total input dimension for the shared layers
-        total_emb_dim  = (len(cate_dims) * 10) + (num_count * 10)
+        total_emb_dim  = (len(cate_dims) * 10) + num_count
         self.shared = nn.Sequential(
         nn.Linear(in_features=total_emb_dim, out_features=shared_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(shared_dropout)
         )
 
-        self.head_0_common = nn.Sequential(
-            nn.Linear(shared_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout),
-            nn.Linear(outcome_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout)
+        self.head_0 = nn.Sequential(
+            nn.Linear(shared_hidden, outcome_hidden), nn.ELU(), nn.Dropout(outcome_dropout),
+            nn.Linear(outcome_hidden, outcome_hidden), nn.ELU(), nn.Dropout(outcome_dropout),
+            nn.Linear(outcome_hidden, 3)
         )
-        self.head_1_common = nn.Sequential(
-            nn.Linear(shared_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout),
-            nn.Linear(outcome_hidden, outcome_hidden), nn.ReLU(), nn.Dropout(outcome_dropout)
+        self.head_1 = nn.Sequential(
+            nn.Linear(shared_hidden, outcome_hidden), nn.ELU(), nn.Dropout(outcome_dropout),
+            nn.Linear(outcome_hidden, outcome_hidden), nn.ELU(), nn.Dropout(outcome_dropout),
+            nn.Linear(outcome_hidden, 3)
         )
-
-        self.y0_mu = nn.Linear(outcome_hidden, 1)
-        self.y0_sigma = nn.Linear(outcome_hidden, 1)
-        self.y0_p = nn.Linear(outcome_hidden, 1)
-
-        self.y1_mu = nn.Linear(outcome_hidden, 1)
-        self.y1_sigma = nn.Linear(outcome_hidden, 1)
-        self.y1_p = nn.Linear(outcome_hidden, 1)
-
-        self._init_weights(positive_rate=positive_rate)
-
-    def _init_weights(self, positive_rate=0.01):
-        sigma_bias = 0.8375
-        p_bias = np.log(positive_rate / (1 - positive_rate))
-        with torch.no_grad():
-            self.y0_p.bias.fill_(p_bias)
-            self.y1_p.bias.fill_(p_bias)
-            
-            self.y0_sigma.bias.fill_(sigma_bias)
-            self.y1_sigma.bias.fill_(sigma_bias)
-
-            # 2. BẮT BUỘC: Init Bias cho Regression (Mu)
-            self.y0_mu.bias.fill_(4.3952)
-            self.y1_mu.bias.fill_(4.3952)
 
     def forward(self, x_cat, x_num):
         """
@@ -90,48 +67,38 @@ class TarnetBase(nn.Module):
         y0: torch.Tensor
             [batch, 3] ZILN logits for control outcome (p, mu, sigma)
         y1: torch.Tensor
-            [batch, 3] ZILN logits for treatment outcome (p, mu, sigma)
+            [batch, 3] ZILN logits for treatment outcome (p, mu, sigma)  
         """
         embeddings = []
         for i, emb_layer in enumerate(self.cat_embeds):
             embeddings.append(emb_layer(x_cat[:, i].long()))  
-        for i, num_layer in enumerate(self.num_count):
-            embeddings.append(num_layer(x_num[:, i].unsqueeze(1))) 
+
+        # Numeric features are used directly without projection layers.
+        if self.num_count > 0:
+            embeddings.append(x_num.float())
 
         z_input = torch.cat(embeddings, dim=1)           
         #concatenate all embeddings and projections to create input for shared layers
         z = self.shared(z_input)
 
-        # --- CONTROL FLOW ---
-        h0 = self.head_0_common(z)
-        mu0 = self.y0_mu(h0)
-        sigma0 = self.y0_sigma(h0)
-        p0 = self.y0_p(h0)
-        y0 = torch.cat([p0, mu0, sigma0], dim=1)
-
-        # --- TREATMENT FLOW ---
-        h1 = self.head_1_common(z)
-        mu1 = self.y1_mu(h1)
-        sigma1 = self.y1_sigma(h1)
-        p1 = self.y1_p(h1)
-        y1 = torch.cat([p1, mu1, sigma1], dim=1)
+        y0 = self.head_0(z)
+        y1 = self.head_1(z)
 
         return y0, y1
 
-def outcome_loss(y_t, y_c, y0_pred, y1_pred, ziln_lambda=1.0, pos_weight=1.0):
+def outcome_loss(y_t, y_c, y0_pred, y1_pred):
 
-    loss_0, cls_loss_0, reg_loss_0, mu_mean_t, sigma_mean_t = zero_inflated_lognormal_loss(y_t, y1_pred, ziln_lambda=ziln_lambda, pos_weight=pos_weight)
-    loss_1, cls_loss_1, reg_loss_1, mu_mean_c, sigma_mean_c = zero_inflated_lognormal_loss(y_c, y0_pred, ziln_lambda=ziln_lambda, pos_weight=pos_weight)
+    loss_treatment = zero_inflated_lognormal_loss(y_t, y1_pred)
+    loss_control = zero_inflated_lognormal_loss(y_c, y0_pred)
 
-    if torch.isnan(loss_0) or torch.isinf(loss_0):
-        loss_0 = loss_0.new_tensor(0.0)
-    if torch.isnan(loss_1) or torch.isinf(loss_1):
-        loss_1 = loss_1.new_tensor(0.0)
+    if torch.isnan(loss_control) or torch.isinf(loss_control):
+        loss_control = loss_control.new_tensor(0.0)
+    if torch.isnan(loss_treatment) or torch.isinf(loss_treatment):
+        loss_treatment = loss_treatment.new_tensor(0.0)
 
-    loss = (loss_0 + loss_1)
-    cls_loss = cls_loss_0 + cls_loss_1
-    reg_loss = reg_loss_0 + reg_loss_1
-    return loss, cls_loss, reg_loss, mu_mean_t, sigma_mean_t, mu_mean_c, sigma_mean_c
+    loss = (loss_control + loss_treatment)
+
+    return loss
            
 class EarlyStopper:
     def __init__(self, patience=15, min_delta=0):

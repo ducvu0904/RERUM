@@ -1,6 +1,7 @@
 
 import torch 
 import torch.nn.functional as F
+import numpy as np
 
 def pairwise_ranking_loss_with_count(pred_row, true_row, pred_col, true_col, max_samples=200):
     """
@@ -208,6 +209,7 @@ def response_ranking_loss(y_true, t_true, y0_pred, y1_pred, max_samples=200):
 
 def uplift_ranking_loss(y_true, t_true, y0_pred, y1_pred):
     """Listwise uplift ranking loss"""
+    
     uplift_pred = y1_pred - y0_pred
     
     if isinstance(y_true, torch. Tensor):

@@ -16,10 +16,19 @@ class DragonNetBase(nn.Module):
     outcome_hidden: int
         layer size for conditional outcome layers
     """
-    def __init__(self, input_dim, shared_hidden=200, outcome_hidden=100, shared_dropout = 0.0,  outcome_dropout=0.0):
+    def __init__(self, cate_dims, num_count, shared_hidden=200, outcome_hidden=100, shared_dropout = 0.0,  outcome_dropout=0.0):
         super(DragonNetBase, self).__init__()
+        
+        #Creat list of embedding layers for categorical features
+        self.cat_embeds = nn.ModuleList([
+            nn.Embedding(dim, 10) for dim in cate_dims
+        ])
+        
+        # Calculate the total input dimension for the shared layers
+        total_emb_dim  = (len(cate_dims) * 10) + num_count
+        
         self.shared = nn.Sequential(
-        nn.Linear(in_features=input_dim, out_features=shared_hidden),
+        nn.Linear(in_features=total_emb_dim, out_features=shared_hidden),
         nn.ReLU(),
         nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
@@ -55,14 +64,16 @@ class DragonNetBase(nn.Module):
         self.epsilon = nn.Linear(in_features=1, out_features=1)
         torch.nn.init.xavier_normal_(self.epsilon.weight)
         
-    def forward(self, inputs):
+    def forward(self, x_cat, x_num):
         """
         forward method to train model.
 
         Parameters
         ----------
-        inputs: torch.Tensor
-            covariates
+        x_cat: torch.Tensor
+            categorical features
+        x_num: torch.Tensor
+            numerical features
 
         Returns
         -------
@@ -72,13 +83,19 @@ class DragonNetBase(nn.Module):
             outcome under treatment
         """
 
-        z = self.shared(inputs)
-        
+        #Process categorical embeddings and raw numerical features.
+        embeddings = []
+        for i, emb_layer in enumerate(self.cat_embeds):
+            embeddings.append(emb_layer(x_cat[:, i].long()))
+        for i in range(x_num.shape[1]):
+            embeddings.append(x_num[:, i].unsqueeze(1))
+            
+        # Pass concatenated features through shared representation layers.
+        z_input = torch.cat(embeddings, dim=1)
+        z = self.shared(z_input)
         t_pred = torch.sigmoid(self.treat_out(z))
-        
         y0 = self.y0(z)
         y1 = self.y1(z)
-        
         eps = self.epsilon(torch.ones_like(t_pred)[:, 0:1])
 
         return y0, y1, t_pred, eps

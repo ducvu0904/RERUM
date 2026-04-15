@@ -1,5 +1,5 @@
 ﻿from model import TarnetBase, EarlyStopper, outcome_loss, QiniEarlyStopper
-from ziln import zero_inflated_lognormal_pred, compute_classification_metrics
+from ziln import zero_inflated_lognormal_pred
 try:
     from model import TarnetBase, EarlyStopper, outcome_loss, QiniEarlyStopper
 except ModuleNotFoundError:
@@ -32,14 +32,12 @@ class Tarnet:
         patience=15,
         early_stop_start_epoch=0,
         outcome_dropout = 0,
-        shared_dropout = 0,
-        positive_rate = 0.01,
-        ziln_lambda=1.0,
-        pos_weight=1.0
-    ):
+        shared_dropout = 0,    
+        ):
+        
         self.model = TarnetBase(cate_dims, num_count, shared_hidden=shared_hidden, outcome_hidden=outcome_hidden,
                                 outcome_dropout=outcome_dropout, shared_dropout=shared_dropout,
-                                positive_rate=positive_rate)
+                                )
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -52,8 +50,6 @@ class Tarnet:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.early_stop_metric = early_stop_metric
-        self.ziln_lambda = ziln_lambda
-        self.pos_weight = pos_weight
 
         # EMA parameters
         self.use_ema = use_ema
@@ -116,7 +112,7 @@ class Tarnet:
                 y0_pred_c = y0_pred[c_mask]
                 y1_pred_t = y1_pred[t_mask]
 
-                loss, cls_loss, reg_loss, mu_mean_t, sigma_mean_t, mu_mean_c, sigma_mean_c = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c, ziln_lambda=self.ziln_lambda, pos_weight=self.pos_weight)
+                loss = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optim.step()
@@ -126,17 +122,6 @@ class Tarnet:
             val_loss = self.validate(val_loader)
             self.scheduler.step(val_loss)
             current_lr = self.optim.param_groups[0]['lr']
-            cls_metrics = self.validate_classification_metrics(val_loader)
-            
-            # Format classification metrics string
-            def fmt_metric(v):
-                return f"{v:.4f}" if v is not None else "N/A"
-            cls_str = (
-                f"F1_c: {fmt_metric(cls_metrics['f1_c'])} | "
-                f"PR_AUC_c: {fmt_metric(cls_metrics['pr_auc_c'])} | "
-                f"F1_t: {fmt_metric(cls_metrics['f1_t'])} | "
-                f"PR_AUC_t: {fmt_metric(cls_metrics['pr_auc_t'])}"
-            )
             
             # EMA QINI EARLY STOP
             if self.early_stop_metric == 'ema_qini':
@@ -166,11 +151,7 @@ class Tarnet:
                 print(
                     f"Epoch {epoch+1}/{self.epoch} | "
                     f"Loss: {loss.item():.4f} | "
-                    f"Cls: {cls_loss:.4f} | Reg: {reg_loss:.4f} | "
-                    f"mu_t: {mu_mean_t:.4f} | sigma_t: {sigma_mean_t:.4f} | "
-                    f"mu_c: {mu_mean_c:.4f} | sigma_c: {sigma_mean_c:.4f} | "
                     f"Val Loss: {val_loss:.4f} | "
-                    f"{cls_str} | "
                     f"Val Qini: {val_qini:.4f} | "
                     f"EMA Qini: {ema_display} | "
                     f"Best EMA: {best_ema_display} {best_marker} | "
@@ -201,11 +182,7 @@ class Tarnet:
                 print(
                     f"Epoch {epoch+1}/{self.epoch} | "
                     f"Loss: {loss.item():.4f} | "
-                    f"Cls: {cls_loss:.4f} | Reg: {reg_loss:.4f} | "
-                    f"mu_t: {mu_mean_t:.4f} | sigma_t: {sigma_mean_t:.4f} | "
-                    f"mu_c: {mu_mean_c:.4f} | sigma_c: {sigma_mean_c:.4f} | "
                     f"Val Loss: {val_loss:.4f} | "
-                    f"{cls_str} | "
                     f"Val Qini: {val_qini:.4f} {best_marker} | "
                     f"LR: {current_lr:.6f}"
                 )
@@ -249,11 +226,7 @@ class Tarnet:
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
                         f"Loss: {loss.item():.4f} | "
-                        f"Cls: {cls_loss:.4f} | Reg: {reg_loss:.4f} | "
-                        f"mu_t: {mu_mean_t:.4f} | sigma_t: {sigma_mean_t:.4f} | "
-                        f"mu_c: {mu_mean_c:.4f} | sigma_c: {sigma_mean_c:.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
-                        f"{cls_str} | "
                         f"Raw Qini: {val_qini:.4f} | "
                         f"EMA Trend: {ema_trend_display} | "
                         f"{best_marker} | "
@@ -279,11 +252,7 @@ class Tarnet:
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
                         f"Loss: {loss.item():.4f} | "
-                        f"Cls: {cls_loss:.4f} | Reg: {reg_loss:.4f} | "
-                        f"mu_t: {mu_mean_t:.4f} | sigma_t: {sigma_mean_t:.4f} | "
-                        f"mu_c: {mu_mean_c:.4f} | sigma_c: {sigma_mean_c:.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
-                        f"{cls_str} | "
                         f"Val Qini: {val_qini:.4f} {best_marker} | "
                         f"LR: {current_lr:.6f}"
                     )
@@ -330,7 +299,7 @@ class Tarnet:
                 y0_pred_c = y0[c_mask]
                 y1_pred_t = y1[t_mask]
 
-                val_loss_batch, _, _, _, _, _, _ = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c, ziln_lambda=1.0)
+                val_loss_batch = outcome_loss(y_t=y_t, y_c=y_c, y1_pred=y1_pred_t, y0_pred=y0_pred_c)
                 val_loss += val_loss_batch.item()
         return val_loss / len(val_loader)
     
@@ -367,67 +336,6 @@ class Tarnet:
         
         return qini_score
     
-    def validate_classification_metrics(self, val_loader):
-        """Calculate F1 and PR-AUC for classification component on validation set.
-        
-        Returns:
-            dict with f1_c, pr_auc_c (control), f1_t, pr_auc_t (treatment)
-        """
-        self.model.eval()
-        
-        # Collect logits and labels separately for control and treatment
-        y0_logits_list = []
-        y1_logits_list = []
-        y_c_list = []  # labels for control group
-        y_t_list = []  # labels for treatment group
-        
-        with torch.no_grad():
-            for x_cate, x_num, t, y in val_loader:
-                x_cate = x_cate.to(self.device)
-                x_num = x_num.to(self.device)
-                t = t.to(self.device)
-                y = y.to(self.device)
-                t_mask = (t.squeeze(1) == 1)
-                c_mask = (t.squeeze(1) == 0)
-                
-                y0_logits, y1_logits = self.model(x_cate, x_num)
-                
-                # Collect control group: y0 logits with control labels
-                if c_mask.sum() > 0:
-                    y0_logits_list.append(y0_logits[c_mask].cpu())
-                    y_c_list.append(y[c_mask])
-                
-                # Collect treatment group: y1 logits with treatment labels
-                if t_mask.sum() > 0:
-                    y1_logits_list.append(y1_logits[t_mask].cpu())
-                    y_t_list.append(y[t_mask])
-        
-        results = {}
-        
-        # Compute metrics for control group (y0)
-        if y0_logits_list:
-            y0_logits_all = torch.cat(y0_logits_list, dim=0)
-            y_c_all = torch.cat(y_c_list, dim=0)
-            metrics_c = compute_classification_metrics(y_c_all, y0_logits_all)
-            results['f1_c'] = metrics_c['f1']
-            results['pr_auc_c'] = metrics_c['pr_auc']
-        else:
-            results['f1_c'] = None
-            results['pr_auc_c'] = None
-        
-        # Compute metrics for treatment group (y1)
-        if y1_logits_list:
-            y1_logits_all = torch.cat(y1_logits_list, dim=0)
-            y_t_all = torch.cat(y_t_list, dim=0)
-            metrics_t = compute_classification_metrics(y_t_all, y1_logits_all)
-            results['f1_t'] = metrics_t['f1']
-            results['pr_auc_t'] = metrics_t['pr_auc']
-        else:
-            results['f1_t'] = None
-            results['pr_auc_t'] = None
-        
-        return results
-        
     def predict(self, x_cate, x_num):
         self.model.eval()
         if isinstance(x_cate, torch.Tensor):

@@ -23,44 +23,40 @@ class TarnetBase(nn.Module):
         self.cat_embeds = nn.ModuleList([
             nn.Embedding(dim, 10) for dim in cate_dims
         ])
-                
-        self.num_projections = nn.ModuleList([
-            nn.Linear(1, 10) for _ in range(num_count)
-        ])
+        self.num_count = num_count
         
-        # Tính toán input_dim mới cho lớp Shared đầu tiên
-        # Mỗi đặc trưng (cả cat và num) đều đóng góp 10 chiều
-        total_emb_dim = (len(cate_dims) + num_count) * 10
+        # Categorical features use embedding; numerical features are concatenated directly.
+        total_emb_dim = (len(cate_dims) * 10) + num_count
         
         
         self.shared = nn.Sequential(
         nn.Linear(in_features=total_emb_dim, out_features=shared_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(shared_dropout),
         nn.Linear(in_features=shared_hidden, out_features=shared_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(shared_dropout)
         )
         
         self.y0 = nn.Sequential(
         nn.Linear(in_features=shared_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(outcome_dropout),
         nn.Linear(in_features=outcome_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(outcome_dropout),
         nn.Linear(in_features=outcome_hidden, out_features=1)
         )
         
         self.y1 = nn.Sequential(
         nn.Linear(in_features=shared_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(outcome_dropout),
         nn.Linear(in_features=outcome_hidden, out_features=outcome_hidden),
-        nn.ReLU(),
+        nn.ELU(),
         nn.Dropout(outcome_dropout),
         nn.Linear(in_features=outcome_hidden, out_features=1)
         )
@@ -83,14 +79,14 @@ class TarnetBase(nn.Module):
         y1: torch.Tensor
             outcome under treatment
         """
-        # Process categorical embeddings and projected numerical features.
+        # Process categorical embeddings and append numerical features directly.
         embeddings = []
         for i, emb_layer in enumerate(self.cat_embeds):
             embeddings.append(emb_layer(x_cat[:, i].long()))
-        for i, proj_layer in enumerate(self.num_projections):
-            embeddings.append(proj_layer(x_num[:, i].unsqueeze(1)))
+        if self.num_count > 0:
+            embeddings.append(x_num.float())
 
-        # [batch, (n_cat + n_num) * 10]
+        # [batch, n_cat * 10 + n_num]
         z_input = torch.cat(embeddings, dim=1)
         z = self.shared(z_input)
         y0 = self.y0(z)

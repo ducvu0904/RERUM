@@ -48,7 +48,6 @@ class Tarnet:
         self.model = TarnetBase(cate_dims, num_count, shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_dropout)
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optim, mode="min", factor = 0.5, patience = 10, min_lr = 1e-6)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.early_stop_metric = early_stop_metric      
@@ -98,7 +97,11 @@ class Tarnet:
         # TRAINING LOOP
         for epoch in range(self.epoch):
             self.model.train()
-            epoch_loss=0
+            epoch_loss = 0.0
+            epoch_base_loss = 0.0
+            epoch_uplift_loss = 0.0
+            epoch_response_loss = 0.0
+            num_batches = 0
             for x_cate, x_num, t_batch, y_batch in train_loader:
                     x_cate = x_cate.to(self.device)
                     x_num = x_num.to(self.device)
@@ -129,11 +132,11 @@ class Tarnet:
                             loss = base_loss + uplift_loss + response_loss
                         elif self.uplift_lambda > 0:
                             uplift_loss = uplift_ranking_loss(y_true= y_batch, t_true=t_batch, y0_pred=y0_pred, y1_pred=y1_pred) * self.uplift_lambda 
-                            response_loss = torch.tensor(0.0)
+                            response_loss = torch.tensor(0.0, device=self.device)
                             loss = base_loss + uplift_loss
                         elif self.rr_lambda > 0: 
                             response_loss = response_ranking_loss(y_true = y_batch, t_true = t_batch, y0_pred = y0_pred, y1_pred = y1_pred, max_samples = self.max_samples) * self.rr_lambda
-                            uplift_loss = torch.tensor(0.0)
+                            uplift_loss = torch.tensor(0.0, device=self.device)
                             loss = base_loss +  response_loss
                         else:
                             uplift_loss = torch.tensor(0.0, device=self.device)  
@@ -148,16 +151,21 @@ class Tarnet:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optim.step()
                     epoch_loss += loss.item()
+                    epoch_base_loss += base_loss.item()
+                    epoch_uplift_loss += uplift_loss.item()
+                    epoch_response_loss += response_loss.item()
+                    num_batches += 1
+
+            # Use epoch means for reporting to avoid noisy last-batch metrics.
+            mean_total_loss = epoch_loss / max(1, num_batches)
+            mean_base_loss = epoch_base_loss / max(1, num_batches)
+            mean_uplift_loss = epoch_uplift_loss / max(1, num_batches)
+            mean_response_loss = epoch_response_loss / max(1, num_batches)
             
             # CALCULATE QINI AND LOSS
             val_qini = self.validate_qini(val_loader)
             val_loss = self.validate(val_loader, epoch)
-            
-            # Step the scheduler based on the selected early stopping metric
-            if self.early_stop_metric == "loss":
-                self.scheduler.step(val_loss)
-            else: 
-                self.scheduler.step(val_qini)
+
             current_lr = self.optim.param_groups[0]['lr']
 
             # Early stopping based on selected metric
@@ -187,16 +195,16 @@ class Tarnet:
                     best_marker = "(ignored before score selection start epoch)"
                 
                 if (epoch+1) % 1 == 0:
-                    uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
-                    pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
+                    uplift_info = f"Uplift Loss: {mean_uplift_loss:.6f} | " if self.uplift_lambda > 0 else ""
+                    pairwise_info = f"Response Loss: {mean_response_loss:.6f} | " if self.rr_lambda > 0 else ""
                     ema_display = f"{self.ema_qini:.4f}" if self.ema_qini is not None else "N/A"
                     best_ema_display = f"{self.best_ema_qini:.4f}" if self.best_ema_model_state is not None else "N/A"
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
-                        f"Base Loss: {base_loss.item():.4f} | "
+                        f"Base Loss: {mean_base_loss:.4f} | "
                         f"{uplift_info}"
                         f"{pairwise_info}"
-                        f"Total Loss: {loss.item():.4f} | "
+                        f"Total Loss: {mean_total_loss:.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
                         f"Val Qini: {val_qini:.4f} | "
                         f"EMA Qini: {ema_display} | "
@@ -227,14 +235,14 @@ class Tarnet:
                     best_marker = "(ignored before score selection start epoch)"
                 
                 if (epoch+1) % 1 == 0:
-                    uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
-                    pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
+                    uplift_info = f"Uplift Loss: {mean_uplift_loss:.6f} | " if self.uplift_lambda > 0 else ""
+                    pairwise_info = f"Response Loss: {mean_response_loss:.6f} | " if self.rr_lambda > 0 else ""
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
-                        f"Base Loss: {base_loss.item():.4f} | "
+                        f"Base Loss: {mean_base_loss:.4f} | "
                         f"{uplift_info}"
                         f"{pairwise_info}"
-                        f"Total Loss: {loss.item():.4f} | "
+                        f"Total Loss: {mean_total_loss:.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
                         f"Val Qini: {val_qini:.4f} {best_marker}"
                         f" | LR: {current_lr:.4f}"
@@ -260,14 +268,14 @@ class Tarnet:
                     best_marker = "(ignored before score selection start epoch)"
 
                 if (epoch+1) % 1 == 0:
-                    uplift_info = f"Uplift Loss: {uplift_loss.item():.6f} | " if self.uplift_lambda > 0 else ""
-                    pairwise_info = f"Response Loss: {response_loss.item():.6f} | " if self.rr_lambda > 0 else ""
+                    uplift_info = f"Uplift Loss: {mean_uplift_loss:.6f} | " if self.uplift_lambda > 0 else ""
+                    pairwise_info = f"Response Loss: {mean_response_loss:.6f} | " if self.rr_lambda > 0 else ""
                     print(
                         f"Epoch {epoch+1}/{self.epoch} | "
-                        f"Base Loss: {base_loss.item():.4f} | "
+                        f"Base Loss: {mean_base_loss:.4f} | "
                         f"{uplift_info}"
                         f"{pairwise_info}"
-                        f"Total Loss: {loss.item():.4f} | "
+                        f"Total Loss: {mean_total_loss:.4f} | "
                         f"Val Loss: {val_loss:.4f} | "
                         f"Val Qini: {val_qini:.4f} {best_marker}"
                     )
@@ -313,7 +321,26 @@ class Tarnet:
 
                 base_loss = outcome_loss(y_t= y_t, y_c= y_c, y1_pred=y1_pred_t, y0_pred= y0_pred_c)
                 
-                val_loss += base_loss.item()
+                if epoch >= self.ranking_start_epoch:
+                    if self.uplift_lambda > 0 and self.rr_lambda > 0:
+                        uplift_loss = uplift_ranking_loss(y_true= y, t_true=t, y0_pred=y0, y1_pred=y1) * self.uplift_lambda
+                        response_loss = response_ranking_loss(y_true = y, t_true = t, y0_pred = y0, y1_pred = y1, max_samples = self.max_samples) * self.rr_lambda
+                        loss = base_loss + uplift_loss + response_loss
+                    elif self.uplift_lambda > 0:
+                        uplift_loss = uplift_ranking_loss(y_true= y, t_true=t, y0_pred=y0, y1_pred=y1) * self.uplift_lambda 
+                        response_loss = torch.tensor(0.0, device=self.device)
+                        loss = base_loss + uplift_loss
+                    elif self.rr_lambda > 0: 
+                        response_loss = response_ranking_loss(y_true = y, t_true = t, y0_pred = y0, y1_pred = y1, max_samples = self.max_samples) * self.rr_lambda
+                        uplift_loss = torch.tensor(0.0, device=self.device)
+                        loss = base_loss +  response_loss
+                    else:
+                        uplift_loss = torch.tensor(0.0, device=self.device)  
+                        response_loss = torch.tensor(0.0, device=self.device)  
+                        loss = base_loss
+                else:
+                    loss = base_loss
+                val_loss += loss.item()
         return val_loss / len(val_loader)
     
     def validate_qini(self, val_loader):

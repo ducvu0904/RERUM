@@ -12,7 +12,8 @@ import copy
 class Dragonnet:
     def __init__(
         self, 
-        input_dim,
+        cate_dims,
+        num_count,
         shared_hidden=200, 
         outcome_hidden=100, 
         alpha=1.0,
@@ -20,7 +21,7 @@ class Dragonnet:
         epochs=25,
         learning_rate= 1e-3,
         weight_decay = 1e-4,
-        early_stop_metric='qini',
+        early_stop_metric='loss',
         use_ema=False,
         ema_alpha=0.15,
         patience=10,
@@ -28,7 +29,7 @@ class Dragonnet:
         shared_dropout = 0,
         outcome_dropout = 0
     ):
-        self.model = DragonNetBase(input_dim,shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_dropout)
+        self.model = DragonNetBase(cate_dims, num_count, shared_hidden=shared_hidden, outcome_hidden=outcome_hidden, shared_dropout=shared_dropout, outcome_dropout=outcome_dropout)
         self.epoch = epochs
         self.optim = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -77,32 +78,32 @@ class Dragonnet:
         for epoch in range(self.epoch):
             self.model.train()
             epoch_loss=0
-            for x_batch , t_batch ,y_batch in train_loader:
-                    x_batch = x_batch.to(self.device)
-                    
-                    t_batch =t_batch.to(self.device) 
-                    y_batch = y_batch.to(self.device)
-                    
-                    t_mask = (t_batch.squeeze(1) == 1)
-                    c_mask = (t_batch.squeeze(1) == 0)
-                    self.optim.zero_grad()
-                    
-                    y0_pred, y1_pred, t_pred, eps = self.model(x_batch)
-                    
-                    y_t = y_batch[t_mask]
-                    y_c = y_batch[c_mask]
+            for x_cate, x_num, t_batch ,y_batch in train_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)                
+                t_batch =t_batch.to(self.device) 
+                y_batch = y_batch.to(self.device)
+                
+                t_mask = (t_batch.squeeze(1) == 1)
+                c_mask = (t_batch.squeeze(1) == 0)
+                self.optim.zero_grad()
+                
+                y0_pred, y1_pred, t_pred, eps = self.model(x_cate, x_num)
+                
+                y_t = y_batch[t_mask]
+                y_c = y_batch[c_mask]
 
-                    y0_pred_c = y0_pred[c_mask]
-                    y1_pred_t = y1_pred[t_mask]
+                y0_pred_c = y0_pred[c_mask]
+                y1_pred_t = y1_pred[t_mask]
 
-                    base_loss = dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t_batch, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha)
-                    tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred=y0_pred, y1_pred=y1_pred, eps=eps, beta= self.beta)
-                    loss = base_loss + tarreg_reg
-                    
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.optim.step()
-                    epoch_loss += loss.item()
+                base_loss = dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t_batch, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha)
+                tarreg_reg = tarreg_loss(y_true= y_batch, t_true= t_batch , t_pred = t_pred, y0_pred=y0_pred, y1_pred=y1_pred, eps=eps, beta= self.beta)
+                loss = base_loss + tarreg_reg
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optim.step()
+                epoch_loss += loss.item()
             
             # Tính Qini score trên validation set sau mỗi epoch
             val_qini = self.validate_qini(val_loader)
@@ -274,19 +275,25 @@ class Dragonnet:
         self.model.eval()
         val_loss=0
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x, t, y = x.to(self.device), t.to(self.device), y.to(self.device)
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                t = t.to(self.device)
+                y = y.to(self.device)
                 t_mask = (t.squeeze(1) == 1)
                 c_mask = (t.squeeze(1) == 0)
-                
-                y0, y1, t_pred, eps = self.model(x)
+
+                y0, y1, t_pred, eps = self.model(x_cate, x_num)
                 y_t = y[t_mask]
                 y_c = y[c_mask]
 
                 y0_pred_c = y0[c_mask]
                 y1_pred_t = y1[t_mask]
 
-                val_loss += dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha).item()
+                base_loss = dragonnet_loss(y_t= y_t, y_c= y_c, t_true=t, t_pred = t_pred, y1_pred=y1_pred_t, y0_pred= y0_pred_c, eps= eps, alpha=self.alpha)
+                tarreg_reg = tarreg_loss(y_true= y, t_true= t , t_pred = t_pred, y0_pred=y0, y1_pred=y1, eps=eps, beta= self.beta)
+                loss = base_loss + tarreg_reg
+                val_loss += loss.item()
         return val_loss / len(val_loader)
     
     def validate_qini(self, val_loader):
@@ -297,10 +304,11 @@ class Dragonnet:
         uplift_list = []
         
         with torch.no_grad():
-            for x, t, y in val_loader:
-                x = x.to(self.device)
-                y0_pred, y1_pred, t_pred, eps = self.model(x)
-                
+            for x_cate, x_num, t, y in val_loader:
+                x_cate = x_cate.to(self.device)
+                x_num = x_num.to(self.device)
+                y0_pred, y1_pred, t_pred, eps = self.model(x_cate, x_num)
+
                 # Tính uplift
                 uplift = (y1_pred - y0_pred).cpu().numpy()
                 
@@ -319,15 +327,12 @@ class Dragonnet:
         
         return qini_score
         
-    def predict(self, x):
+    def predict(self, x_cate, x_num):
         self.model.eval()
-        if not isinstance(x, torch.Tensor):
-            x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
-        else:
-            # Avoid re-wrapping tensor inputs; just move/cast when needed.
-            x = x.to(device=self.device, dtype=torch.float32)
+        x_cate = x_cate.to(device=self.device, dtype=torch.long)
+        x_num = x_num.to(device=self.device, dtype=torch.float32)
         with torch.no_grad():
-            y0_pred, y1_pred,_,_ = self.model(x)
+            y0_pred, y1_pred,_,_ = self.model(x_cate, x_num)
         return y0_pred, y1_pred
             
 # Xem uplift của một cá nhân bất kỳ
